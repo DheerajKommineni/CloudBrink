@@ -1,0 +1,36 @@
+# ========================
+# Core folders to ignore
+# ========================
+node_modules/
+dist/
+build/
+
+# ========================
+# Environment / Secrets
+# ========================
+.env
+.env.local
+backend/.env
+frontend/.env
+
+# ========================
+# Logs and cache
+# ========================
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# ========================
+# Editor / OS specific
+# ========================
+.vscode/
+.idea/
+.DS_Store
+
+# ========================
+# Miscellaneous
+# ========================
+*.bak
+*.tmp
