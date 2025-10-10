@@ -1,0 +1,9 @@
+{
+  "dependencies": {
+    "react-router-dom": "^7.9.3"
+  },
+  "devDependencies": {
+    "autoprefixer": "^10.4.21",
+    "postcss": "^8.5.6"
+  }
+}
