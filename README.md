@@ -1,128 +1,125 @@
 # CloudBrink Documentation Portal
 
-A full-stack web app built with React (frontend), Node.js + Express (backend),
-and PostgreSQL (database).
+A full-stack web application built with React (frontend), Node.js + Express
+(backend), and PostgreSQL (database).
 
 ---
 
-## 1. Install Required Software
+## Prerequisites
 
-Install these before running the app:
+Before you begin, you need to install the following software on your computer:
 
-1. **Node.js (with npm)**  
-   Download from: https://nodejs.org/en/download/  
-   Choose the LTS version.  
-   Verify after install: node -v npm -v
+### 1. Node.js (with npm)
 
-2. **PostgreSQL**  
-   Download from: https://www.postgresql.org/download/  
-   Note your:
+- **Download from:** https://nodejs.org/en/download/
+- Choose the **LTS version** (recommended)
+- After installation, verify by running:
+  ```bash
+  node -v
+  npm -v
+  ```
 
-- Username: `postgres`
-- Password: your chosen password
-- Port: `5432`
+### 2. PostgreSQL
 
-3. **Git**  
-   Download from: https://git-scm.com/downloads  
-   Verify after install: git --version
+- **Download from:** https://www.postgresql.org/download/
+- During installation, remember:
+  - Username: `postgres`
+  - Password: (choose a strong password)
+  - Port: `5432` (default)
+
+### 3. Git
+
+- **Download from:** https://git-scm.com/downloads
+- After installation, verify by running:
+  ```bash
+  git --version
+  ```
 
 ---
 
-## 2. Clone the Repository
+## Installation Steps
 
-Open your terminal and run:
+### Step 1: Clone the Repository
 
+Open your terminal (Command Prompt on Windows, Terminal on Mac/Linux) and run:
+
+```bash
 git clone https://github.com/DheerajKommineni/CloudBrink.git
-
 cd CloudBrink
+```
 
 ---
 
-## 3. Create Database
+### Step 2: Set Up PostgreSQL Database
 
-1. Open PostgreSQL shell or pgAdmin.
+#### 2.1 Open PostgreSQL Shell
 
-STEP 1: Open the PostgreSQL Shell (psql) • Windows
+**On Windows:**
 
-Search “SQL Shell (psql)” in the Start Menu and open it.
+1. Search "SQL Shell (psql)" in the Start Menu and open it
+2. You'll see prompts:
+   ```
+   Server [localhost]:
+   Database [postgres]:
+   Port [5432]:
+   Username [postgres]:
+   Password for user postgres:
+   ```
+3. Press **Enter** for the first three prompts (server, database, port)
+4. When asked for **Password**, enter the password you set during installation
 
-You’ll see a prompt like this:
+**On Mac/Linux:**
 
-Server [localhost]: Database [postgres]: Port [5432]: Username [postgres]:
-Password for user postgres:
+1. Open Terminal and run:
+   ```bash
+   psql -U postgres
+   ```
+2. Enter your password when prompted
 
-Just press Enter for the first three (server, database, port).
+**If you forgot your password or never set one:**
 
-When asked for Password, type the password you set during installation.
+Run these commands in your terminal:
 
-⚠️ If you don’t remember setting one, see Step 2 below to create a new password.
+**Windows (inside SQL Shell):**
 
-• Mac / Linux
+```sql
+ALTER USER postgres PASSWORD 'postgres123';
+\q
+```
 
-Open your terminal and run:
+**Mac/Linux:**
 
-psql -U postgres
-
-If you see Password for user postgres: and you don’t remember it, follow Step 2
-below.
-
-If it says “command not found”, reinstall PostgreSQL or add it to your PATH.
-
-STEP 2: Set or Reset Your PostgreSQL Password
-
-If you forgot or never set a password, run the following:
-
-On Windows (inside SQL Shell): ALTER USER postgres PASSWORD 'postgres123';
-
-On Mac / Linux (from Terminal): sudo -u postgres psql
+```bash
+sudo -u postgres psql
+```
 
 Then inside psql:
 
+```sql
 ALTER USER postgres PASSWORD 'postgres123';
-
-Exit:
-
 \q
+```
 
-You’ve now created a password:
+Now you have:
 
-Username: postgres Password: postgres123
+- Username: `postgres`
+- Password: `postgres123`
 
-Keep these — you’ll need them for your .env file.
+#### 2.2 Create the Database
 
-Step 3: Create the Database
+Connect to PostgreSQL again with your password, then run:
 
-Now connect again with your new password:
+```sql
+CREATE DATABASE cloudbrink_docs;
+\c cloudbrink_docs
+```
 
-Windows (SQL Shell)
+You should see:
+`You are now connected to database "cloudbrink_docs" as user "postgres".`
 
-Press Enter for server, database, port, and username again, then type:
+#### 2.3 Create Tables
 
-Password for user postgres: postgres123
-
-Mac / Linux psql -U postgres -W
-
-(Enter postgres123 when prompted.)
-
-Then create and connect to the database:
-
-CREATE DATABASE cloudbrink_docs; \c cloudbrink_docs
-
-Step 4: Verify the Connection
-
-You should now see something like:
-
-You are now connected to database "cloudbrink_docs" as user "postgres".
-
-If you do, PostgreSQL is ready!
-
-2. Run:
-
-CREATE DATABASE cloudbrink_docs; \c cloudbrink_docs
-
-## 4. Create Tables
-
-Run these SQL commands to set up your schema:
+Copy and paste these commands into the PostgreSQL shell:
 
 ```sql
 -- Create 'uploads' table
@@ -140,10 +137,8 @@ CREATE TABLE uploads (
   CONSTRAINT uploads_filename_section_unique UNIQUE (filename, section)
 );
 
--- Index for section lookups
+-- Create index for better performance
 CREATE INDEX idx_uploads_section ON uploads(section);
-
-------------------------------------------------------------
 
 -- Create 'converted_files' table
 CREATE TABLE converted_files (
@@ -158,6 +153,7 @@ CREATE TABLE converted_files (
   CONSTRAINT converted_files_upload_id_unique UNIQUE (upload_id)
 );
 
+-- Create 'downloads' table
 CREATE TABLE downloads (
   id SERIAL PRIMARY KEY,
   os_name VARCHAR(50),
@@ -167,100 +163,331 @@ CREATE TABLE downloads (
   added_at TIMESTAMP DEFAULT NOW()
 );
 
+-- Insert sample download data
 INSERT INTO downloads (os_name, version, download_url, description)
 VALUES
-('windows', '14.4.462', 'https://cloudbrink.com/brink-app-dl/BrinkAgent-latest.msi', 'Click below to download the latest Windows app'),
-('mac', '14.4.462', 'https://cloudbrink.com/brink-app-dl/BrinkAgent-latest.pkg', 'Click below to download the latest Mac app'),
-('ubuntu', '14.4.462 – 22.04', 'https://cloudbrink.com/brink-app-dl/BrinkAgent-latest.deb', 'Click below to download the latest Ubuntu app');
+  ('windows', '14.4.462', 'https://cloudbrink.com/brink-app-dl/BrinkAgent-latest.msi', 'Click below to download the latest Windows app'),
+  ('mac', '14.4.462', 'https://cloudbrink.com/brink-app-dl/BrinkAgent-latest.pkg', 'Click below to download the latest Mac app'),
+  ('ubuntu', '14.4.462 – 22.04', 'https://cloudbrink.com/brink-app-dl/BrinkAgent-latest.deb', 'Click below to download the latest Ubuntu app');
+```
 
-## 5. Environment Variables
+After running all commands, type `\q` to exit PostgreSQL shell.
 
-Create .env files in both the backend and frontend directories.
+---
 
-Backend (backend/.env)
+### Step 3: Configure Environment Variables
 
-PGUSER=postgres
-PGPASSWORD=your_password or postgres123
-PGDATABASE=cloudbrink_docs
-PGHOST=localhost
-PGPORT=5432
-PORT=5000
+You need to create configuration files for both backend and frontend.
 
-Frontend (frontend/.env)
+#### 3.1 Backend Configuration
 
-VITE_API_BASE_URL=http://localhost:5000
+1. Navigate to the backend folder:
 
-## 6. Run the Application
+   ```bash
+   cd backend
+   ```
 
-Start Backend
+2. Create a file named `.env` (note the dot at the beginning)
+
+3. Add the following content (replace `your_password` with your actual
+   PostgreSQL password):
+
+   ```env
+   PGUSER=postgres
+   PGPASSWORD=your_password
+   PGDATABASE=cloudbrink_docs
+   PGHOST=localhost
+   PGPORT=5432
+   PORT=5000
+   ```
+
+   If you used `postgres123` as password in Step 2:
+
+   ```env
+   PGUSER=postgres
+   PGPASSWORD=postgres123
+   PGDATABASE=cloudbrink_docs
+   PGHOST=localhost
+   PGPORT=5432
+   PORT=5000
+   ```
+
+#### 3.2 Frontend Configuration
+
+1. Navigate to the frontend folder:
+
+   ```bash
+   cd ../frontend
+   ```
+
+2. Create a file named `.env`
+
+3. Add the following content:
+   ```env
+   VITE_API_BASE_URL=http://localhost:5000
+   ```
+
+---
+
+### Step 4: Install Dependencies
+
+#### 4.1 Install Backend Dependencies
+
+```bash
 cd backend
-npm run dev
+npm install
+```
 
-Start Frontend (in another terminal)
+Wait for the installation to complete (this may take a few minutes).
+
+#### 4.2 Install Frontend Dependencies
+
+Open a **new terminal window** and run:
+
+```bash
 cd frontend
+npm install
+```
+
+---
+
+### Step 5: Run the Application
+
+You need to run both backend and frontend servers simultaneously.
+
+#### 5.1 Start the Backend Server
+
+In the first terminal (in the `backend` folder):
+
+```bash
 npm run dev
+```
 
-## 7. Access the Application
+You should see: `🚀 Server running on port 5000`
 
-Once both servers are running, open your browser and go to:
+**Keep this terminal running!**
 
+#### 5.2 Start the Frontend Server
+
+In the second terminal (in the `frontend` folder):
+
+```bash
+npm run dev
+```
+
+You should see something like:
+
+```
+  VITE v... ready in ... ms
+
+  ➜  Local:   http://localhost:5173/
+```
+
+**Keep this terminal running too!**
+
+---
+
+### Step 6: Access the Application
+
+Open your web browser and go to:
+
+```
 http://localhost:5173
+```
 
-## 8. Troubleshooting
-Database not connecting
+You should see the CloudBrink Documentation Portal!
 
-Ensure PostgreSQL is running.
+---
 
-Check your credentials in .env.
+## Troubleshooting
 
-Verify the cloudbrink_docs database and tables exist.
+### Database Connection Issues
 
-npm install errors
+**Problem:** "Connection refused" or "password authentication failed"
+
+**Solutions:**
+
+1. Verify PostgreSQL is running:
+
+   - Windows: Check Services → PostgreSQL should be running
+   - Mac/Linux: Run `sudo service postgresql status`
+
+2. Double-check your `.env` file in the backend folder
+3. Verify the database exists:
+   ```bash
+   psql -U postgres -d cloudbrink_docs
+   ```
+
+### npm Install Errors
+
+**Problem:** Errors during `npm install`
+
+**Solution:**
+
+```bash
 npm cache clean --force
 rm -rf node_modules package-lock.json
 npm install
+```
 
-Port already in use
+### Port Already in Use
 
-Find the process using:
+**Problem:** "Port 5000 is already in use" or "Port 5173 is already in use"
 
+**Solution:**
+
+**On Mac/Linux:**
+
+```bash
+# Find process using the port
 lsof -i :5000
 lsof -i :5173
 
-
-Then kill it:
-
+# Kill the process (replace <PID> with the actual process ID)
 kill -9 <PID>
+```
 
-## 9. Build for Production
+**On Windows:**
 
-To build the frontend for production:
+```bash
+# Find process using the port
+netstat -ano | findstr :5000
+netstat -ano | findstr :5173
 
+# Kill the process (replace <PID> with the actual process ID)
+taskkill /PID <PID> /F
+```
+
+### Application Not Loading
+
+**Problem:** Browser shows "Cannot connect" or blank page
+
+**Solutions:**
+
+1. Make sure **both** backend and frontend servers are running
+2. Check the terminal for error messages
+3. Verify URLs:
+   - Backend: http://localhost:5000
+   - Frontend: http://localhost:5173
+4. Clear browser cache and refresh (Ctrl+Shift+R or Cmd+Shift+R)
+
+---
+
+## Building for Production
+
+When you're ready to deploy the application:
+
+```bash
 cd frontend
 npm run build
+```
 
+The production-ready files will be created in the `frontend/dist` folder.
 
-The production-ready files will be available in:
+---
 
-frontend/dist
+## Quick Setup Checklist
 
-## 10. Quick Setup Checklist
+Use this checklist to ensure everything is set up correctly:
 
-Node.js and npm installed
+- [ ] Node.js and npm installed and verified
+- [ ] PostgreSQL installed and running
+- [ ] Database `cloudbrink_docs` created
+- [ ] All three tables created (`uploads`, `converted_files`, `downloads`)
+- [ ] Sample data inserted into `downloads` table
+- [ ] Backend `.env` file created with correct credentials
+- [ ] Frontend `.env` file created
+- [ ] Backend dependencies installed (`npm install` in backend folder)
+- [ ] Frontend dependencies installed (`npm install` in frontend folder)
+- [ ] Backend server running on port 5000
+- [ ] Frontend server running on port 5173
+- [ ] Application accessible at http://localhost:5173
 
-PostgreSQL running locally
+---
 
-Database cloudbrink_docs created
-
-Tables created (uploads, converted_files, downloads)
-
-.env files configured
-
-Backend on port 5000
-
-Frontend on port 5173
-
-Access via http://localhost:5173
-
+## Project Structure
 
 ```
+CloudBrink/
+├── backend/
+│   ├── node_modules/          # Backend dependencies (not in Git)
+│   ├── routes/                # API routes
+│   ├── utils/                 # Utility functions
+│   ├── uploads/               # Uploaded PDF files
+│   ├── converted/             # Converted markdown files
+│   ├── .env                   # Backend configuration (create this)
+│   ├── server.js              # Main backend file
+│   ├── db.js                  # Database configuration
+│   ├── package.json
+│   └── ...
+├── frontend/
+│   ├── node_modules/          # Frontend dependencies (not in Git)
+│   ├── src/
+│   │   ├── components/        # React components
+│   │   ├── pages/             # Page components
+│   │   └── ...
+│   ├── .env                   # Frontend configuration (create this)
+│   ├── package.json
+│   └── ...
+├── .gitignore                 # Files to ignore in Git
+└── README.md                  # This file
+```
+
+---
+
+## Need Help?
+
+If you encounter any issues not covered in the troubleshooting section:
+
+1. Check that all steps were completed in order
+2. Verify all software versions are compatible
+3. Look for error messages in the terminal
+4. Make sure both backend and frontend servers are running
+
+---
+
+## Common Issues for First-Time Users
+
+### "Command not found" errors
+
+- Make sure you've installed Node.js and it's in your system PATH
+- Restart your terminal after installing software
+
+### PostgreSQL connection issues
+
+- Verify PostgreSQL service is running
+- Check username and password in `.env` file
+- Ensure database `cloudbrink_docs` exists
+
+### npm install taking too long
+
+- This is normal for the first installation
+- It may take 5-10 minutes depending on your internet speed
+
+### Can't see the application in browser
+
+- Wait for both servers to fully start
+- Look for "ready" messages in both terminals
+- Check for error messages in the terminals
+
+---
+
+## Important Notes
+
+⚠️ **Security Notice:**
+
+- The `.env` files contain sensitive information and are NOT included in the Git
+  repository
+- Never commit `.env` files to version control
+- Each user must create their own `.env` files with their credentials
+
+💡 **Tips:**
+
+- Keep both terminal windows open while using the application
+- Use `Ctrl+C` (or `Cmd+C` on Mac) to stop the servers when you're done
+- The application uses `nodemon` which automatically restarts when you make code
+  changes
+
+---
+
+**Happy coding! 🚀**
