@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import Sidebar from '../components/layout/sidebar';
 import ReactMarkdown from 'react-markdown';
@@ -17,6 +17,8 @@ export default function Docs() {
   const [selectedItem, setSelectedItem] = useState(null);
   const [mdText, setMdText] = useState('');
   const [loading, setLoading] = useState(false);
+  const [liveSearchQuery, setLiveSearchQuery] = useState('');
+  const searchRef = useRef();
 
   // Get query param (?q=...)
   useEffect(() => {
@@ -28,10 +30,15 @@ export default function Docs() {
   // Handles clicks in Sidebar and updates URL
   const handleSelect = item => {
     setSelectedItem(item);
+    if (searchRef.current) {
+      searchRef.current.clearSearch();
+    }
     const cleanFile = item.file.replace(/\.pdf$/i, '').replace(/\.md$/i, '');
-    navigate(
-      `/docs/${item.code}/${cleanFile}${queryParam ? `?q=${queryParam}` : ''}`,
-    );
+    navigate(`/docs/${item.code}/${cleanFile}`, { replace: true });
+  };
+
+  const handleSearchChange = query => {
+    setLiveSearchQuery(query);
   };
 
   // Fetches markdown when route changes
@@ -99,13 +106,13 @@ export default function Docs() {
   return (
     <div className="flex min-h-screen bg-white">
       {/* Sidebar - Fixed width */}
-      <Sidebar onSelect={handleSelect} highlight={queryParam} />
+      <Sidebar onSelect={handleSelect} highlight={liveSearchQuery} />
 
       {/* Right content area - Takes remaining space */}
       <main className="flex-1 min-w-0 px-8 py-6 overflow-y-auto">
         {/* Global Search Bar */}
         <div className="flex justify-end mb-6">
-          <GlobalSearch />
+          <GlobalSearch ref={searchRef} onSearchChange={handleSearchChange} />
         </div>
 
         {/* Header: Title, Section, and Download */}

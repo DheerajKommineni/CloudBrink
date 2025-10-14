@@ -474,14 +474,14 @@ If you encounter any issues not covered in the troubleshooting section:
 
 ## Important Notes
 
-⚠️ **Security Notice:**
+**Security Notice:**
 
 - The `.env` files contain sensitive information and are NOT included in the Git
   repository
 - Never commit `.env` files to version control
 - Each user must create their own `.env` files with their credentials
 
-💡 **Tips:**
+**Tips:**
 
 - Keep both terminal windows open while using the application
 - Use `Ctrl+C` (or `Cmd+C` on Mac) to stop the servers when you're done
@@ -490,4 +490,14 @@ If you encounter any issues not covered in the troubleshooting section:
 
 ---
 
-**Happy coding! 🚀**
+# Additional Setup for Updated Version
+
+If you've pulled the latest changes from the repository, you need to install one
+additional dependency: Install Poppler Utils (Required for PDF Image Extraction)
+On Mac: bashbrew install poppler On Ubuntu/Debian: bashsudo apt-get install
+poppler-utils On Windows:
+
+Download from: http://blog.alivate.com.au/poppler-windows/ Extract and add to
+PATH, OR Use WSL (Windows Subsystem for Linux) with Ubuntu instructions
+
+Verify installation: bashpdfimages -v

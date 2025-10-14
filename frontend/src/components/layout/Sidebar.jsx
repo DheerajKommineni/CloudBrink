@@ -102,7 +102,11 @@ const Sidebar = ({ onSelect, highlight }) => {
     onSelect(item);
     const cleanFile = item.file.replace(/\.pdf$/i, '').replace(/\.md$/i, '');
     navigate(
-      `/docs/${item.code}/${cleanFile}${highlight ? `?q=${highlight}` : ''}`,
+      {
+        pathname: `/docs/${item.code}/${cleanFile}`,
+        search: '',
+      },
+      { replace: true },
     );
   };
 

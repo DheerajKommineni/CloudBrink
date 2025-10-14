@@ -6,7 +6,7 @@ export default function DownloadsPage() {
   const [downloads, setDownloads] = useState([]);
 
   useEffect(() => {
-    document.title = 'Downloads - Cloudbrink Docs';
+    // document.title = 'Documentation';
 
     // Fetch from backend
     fetch('/api/downloads')

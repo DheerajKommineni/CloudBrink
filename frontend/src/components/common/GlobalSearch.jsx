@@ -1,14 +1,37 @@
-import { useState, useEffect, useRef } from 'react';
+import {
+  useState,
+  useEffect,
+  useRef,
+  forwardRef,
+  useImperativeHandle,
+} from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { Search, X } from 'lucide-react';
 
-export default function GlobalSearch() {
+const GlobalSearch = forwardRef(({ onSearchChange }, ref) => {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
   const wrapperRef = useRef();
+
+  useImperativeHandle(ref, () => ({
+    clearSearch: () => {
+      setQuery('');
+      setResults([]);
+      setOpen(false);
+      if (onSearchChange) {
+        onSearchChange('');
+      }
+    },
+  }));
+
+  useEffect(() => {
+    if (onSearchChange) {
+      onSearchChange(query);
+    }
+  }, [query, onSearchChange]);
 
   // Initialize query from URL on mount
   useEffect(() => {
@@ -93,7 +116,9 @@ export default function GlobalSearch() {
     setQuery('');
     setResults([]);
     setOpen(false);
-    // Clear URL parameter
+    if (onSearchChange) {
+      onSearchChange('');
+    }
     navigate(location.pathname, { replace: true });
   };
 
@@ -131,10 +156,14 @@ export default function GlobalSearch() {
                   .replace(/\.md$/, '')
                   .replace(/\.pdf$/, '');
                 setOpen(false);
+                setQuery('');
+                if (onSearchChange) {
+                  onSearchChange('');
+                }
                 // Navigate WITHOUT query parameter - no highlights
                 navigate(`/docs/${r.code}/${cleanFile}`);
                 // Clear input
-                setTimeout(() => setQuery(''), 100);
+                // setTimeout(() => setQuery(''), 100);
               }}
             >
               <p className="font-semibold text-gray-800 text-sm mb-1">
@@ -157,4 +186,7 @@ export default function GlobalSearch() {
       )}
     </div>
   );
-}
+});
+GlobalSearch.displayName = 'GlobalSearch';
+
+export default GlobalSearch;

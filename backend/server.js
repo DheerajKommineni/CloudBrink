@@ -18,90 +18,127 @@ const __dirname = path.dirname(__filename);
 const app = express();
 app.use(cors());
 app.use(express.json());
+
 const uploadsDir = path.join(__dirname, 'uploads');
 const convertedDir = path.join(__dirname, 'converted');
 
-if (!fs.existsSync(convertedDir))
+if (!fs.existsSync(convertedDir)) {
   fs.mkdirSync(convertedDir, { recursive: true });
+}
 
-// Convert PDF → Markdown using the util
+/**
+ * Convert PDF to Markdown (with image caching)
+ */
 async function convertPdfToMarkdown(pdfPath, mdPath) {
-  const markdown = await pdfToMarkdown(pdfPath);
+  const outputDir = path.join(__dirname, 'uploads');
+  const markdown = await pdfToMarkdown(pdfPath, outputDir);
   fs.writeFileSync(mdPath, markdown, 'utf8');
-  console.log(
-    `Converted: ${path.basename(pdfPath)} → ${path.basename(mdPath)}`,
-  );
+  console.log(`Converted: ${path.basename(pdfPath)}`);
   return mdPath;
 }
 
-// Bulk conversion on startup
-async function convertAllPdfs(uploadRoot, convertedRoot) {
-  const sections = fs
-    .readdirSync(uploadRoot)
-    .filter(name => fs.statSync(path.join(uploadRoot, name)).isDirectory());
+/**
+ * Check if conversion is needed
+ */
+function needsConversion(pdfPath, mdPath) {
+  if (!fs.existsSync(mdPath)) return true;
 
-  for (const section of sections) {
-    const sectionPath = path.join(uploadRoot, section);
-    const outDir = path.join(convertedRoot, section);
-    if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+  const pdfStats = fs.statSync(pdfPath);
+  const mdStats = fs.statSync(mdPath);
 
-    const files = fs.readdirSync(sectionPath).filter(f => f.endsWith('.pdf'));
+  // Re-convert if PDF is newer than MD
+  return pdfStats.mtime > mdStats.mtime;
+}
 
-    for (const file of files) {
-      const pdfPath = path.join(sectionPath, file);
-      const mdPath = path.join(outDir, file.replace(/\.pdf$/i, '.md'));
+/**
+ * Bulk conversion on startup (optimized - uses DB)
+ */
+async function convertAllPdfs() {
+  let skipped = 0;
+  let converted = 0;
 
-      if (!fs.existsSync(mdPath)) {
-        await convertPdfToMarkdown(pdfPath, mdPath);
-        const { rows } = await pool.query(
-          'SELECT id FROM uploads WHERE filename = $1',
-          [file],
+  try {
+    // Get all PDFs from uploads table
+    const result = await pool.query(`
+      SELECT u.id, u.filename, u.filepath, u.section, u.code,
+             c.conversion_status, c.md_path
+      FROM uploads u
+      LEFT JOIN converted_files c ON u.id = c.upload_id
+    `);
+
+    for (const row of result.rows) {
+      if (!row.filepath || !fs.existsSync(row.filepath)) {
+        continue;
+      }
+
+      const section = row.section || 'misc';
+      const outDir = path.join(convertedDir, section);
+
+      if (!fs.existsSync(outDir)) {
+        fs.mkdirSync(outDir, { recursive: true });
+      }
+
+      const mdPath = path.join(outDir, row.filename.replace(/\.pdf$/i, '.md'));
+
+      // Skip if already converted and up-to-date
+      if (
+        row.conversion_status === 'completed' &&
+        row.md_path &&
+        fs.existsSync(row.md_path) &&
+        !needsConversion(row.filepath, mdPath)
+      ) {
+        skipped++;
+        continue;
+      }
+
+      try {
+        await convertPdfToMarkdown(row.filepath, mdPath);
+        converted++;
+        await saveConvertedFile(
+          row.id,
+          path.basename(mdPath),
+          mdPath,
+          row.code,
         );
-
-        if (rows.length > 0) {
-          const uploadId = rows[0].id;
-          await saveConvertedFile(uploadId, path.basename(mdPath), mdPath);
-        } else {
-          console.warn(`⚠️ No upload record found for ${file}`);
-        }
-      } else {
-        console.log(`Skipped (already exists): ${file}`);
+      } catch (err) {
+        console.error(`Failed to convert ${row.filename}:`, err.message);
       }
     }
+
+    console.log(
+      `Startup conversion: ${converted} converted, ${skipped} skipped`,
+    );
+  } catch (err) {
+    console.error('Startup conversion error:', err.message);
   }
 }
 
-await convertAllPdfs(uploadsDir, convertedDir);
+// Run startup conversion
+await convertAllPdfs();
 
-// Serve Markdown
-// Serve Markdown using DB metadata
+/**
+ * Serve Markdown using DB metadata
+ */
 app.get('/api/docs/:code/:filename', async (req, res) => {
   try {
     const { code, filename } = req.params;
     const cleanFilename = filename.replace(/\.md$/i, '');
 
-    console.log('Request:', { code, filename, cleanFilename }); // Debug
-
     const result = await pool.query(
       `SELECT c.md_path, c.code
-         FROM converted_files c
-         JOIN uploads u ON c.upload_id = u.id
-         WHERE u.filename = $1 AND c.code = $2`,
+       FROM converted_files c
+       JOIN uploads u ON c.upload_id = u.id
+       WHERE u.filename = $1 AND c.code = $2`,
       [`${cleanFilename}.pdf`, code],
     );
 
-    console.log('Query result:', result.rows); // Debug
-
     if (result.rowCount === 0) {
-      console.log('Document not found for:', { code, filename });
       return res.status(404).send('Document not found.');
     }
 
     const mdPath = result.rows[0].md_path;
-    console.log('MD Path:', mdPath);
 
     if (!fs.existsSync(mdPath)) {
-      console.log('File does not exist:', mdPath);
       return res.status(404).send('Markdown file missing.');
     }
 
@@ -109,13 +146,14 @@ app.get('/api/docs/:code/:filename', async (req, res) => {
     res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
     res.send(content);
   } catch (err) {
-    console.error('💥 Markdown Error:', err.message);
+    console.error('Markdown Error:', err.message);
     res.status(500).send('Failed to load Markdown file.');
   }
 });
 
-// Serve PDF for download
-// Serve PDF for download (using DB path)
+/**
+ * Serve PDF for download
+ */
 app.get('/api/download/:filename', async (req, res) => {
   try {
     const { filename } = req.params;
@@ -130,6 +168,7 @@ app.get('/api/download/:filename', async (req, res) => {
     }
 
     const pdfPath = result.rows[0].filepath;
+
     if (!fs.existsSync(pdfPath)) {
       return res.status(404).send('File missing on server.');
     }
@@ -141,23 +180,26 @@ app.get('/api/download/:filename', async (req, res) => {
   }
 });
 
-// Fixed Search Endpoint
-// Search documents using converted_files table
+/**
+ * Search documents using converted_files table
+ */
 app.get('/api/search', async (req, res) => {
   try {
     const query = req.query.q?.toLowerCase();
     if (!query || query.length < 2) return res.json([]);
 
-    // Join with uploads table to get code
     const result = await pool.query(
       `SELECT c.md_filename, c.md_path, c.upload_id, u.code
-         FROM converted_files c
-         JOIN uploads u ON c.upload_id = u.id`,
+       FROM converted_files c
+       JOIN uploads u ON c.upload_id = u.id
+       WHERE c.conversion_status = 'completed'`,
     );
 
     const matches = [];
+
     for (const row of result.rows) {
       if (!fs.existsSync(row.md_path)) continue;
+
       const content = fs.readFileSync(row.md_path, 'utf8');
       const lower = content.toLowerCase();
 
@@ -185,18 +227,29 @@ app.get('/api/search', async (req, res) => {
   }
 });
 
-// Get all available documents
+/**
+ * Serve images from uploads directory
+ */
+app.get('/api/images/:folder/:filename', (req, res) => {
+  const { folder, filename } = req.params;
+  const imagePath = path.join(__dirname, 'uploads', 'images', folder, filename);
+  res.sendFile(imagePath);
+});
+
+/**
+ * Get all available documents
+ */
 app.get('/api/docs', async (req, res) => {
   try {
     const result = await pool.query(`
-        SELECT u.id, u.filename, u.section, u.description, 
-               u.code, u.filepath, c.md_filename, c.md_path, c.code as converted_code
-        FROM uploads u
-        LEFT JOIN converted_files c ON u.id = c.upload_id
-        ORDER BY u.uploaded_at DESC;
-      `);
+      SELECT u.id, u.filename, u.section, u.description, 
+             u.code, u.filepath, c.md_filename, c.md_path, 
+             c.code as converted_code, c.conversion_status
+      FROM uploads u
+      LEFT JOIN converted_files c ON u.id = c.upload_id
+      ORDER BY u.uploaded_at DESC;
+    `);
 
-    // Helper to map database keys to full section titles
     function getSectionTitle(sectionKey) {
       const titles = {
         admin: 'Admin Guides',
@@ -206,7 +259,6 @@ app.get('/api/docs', async (req, res) => {
       return titles[sectionKey?.toLowerCase()] || sectionKey || 'Miscellaneous';
     }
 
-    // Group by code (not section)
     const grouped = {};
     result.rows.forEach(row => {
       const code = row.code || 'misc';
@@ -219,11 +271,11 @@ app.get('/api/docs', async (req, res) => {
         file: row.filename,
         section: row.section,
         code: row.code,
+        conversionStatus: row.conversion_status,
         downloadUrl: `/api/download/${encodeURIComponent(row.filename)}`,
       });
     });
 
-    // Use code as the key
     const formatted = Object.entries(grouped).map(([code, items]) => ({
       title: getSectionTitle(code),
       section: items[0]?.section,
@@ -238,20 +290,22 @@ app.get('/api/docs', async (req, res) => {
   }
 });
 
-// Save converted file path to DB
-async function saveConvertedFile(uploadId, mdFilename, mdPath) {
+/**
+ * Save converted file path to DB
+ */
+async function saveConvertedFile(uploadId, mdFilename, mdPath, code) {
   try {
     await pool.query(
-      `INSERT INTO converted_files (upload_id, md_filename, md_path, conversion_status)
-         VALUES ($1, $2, $3, 'completed')
-         ON CONFLICT (upload_id) DO UPDATE
-         SET md_filename = EXCLUDED.md_filename,
-             md_path = EXCLUDED.md_path,
-             conversion_status = 'completed',
-             converted_at = NOW();`,
-      [uploadId, mdFilename, mdPath],
+      `INSERT INTO converted_files (upload_id, md_filename, md_path, code, conversion_status)
+       VALUES ($1, $2, $3, $4, 'completed')
+       ON CONFLICT (upload_id) DO UPDATE
+       SET md_filename = EXCLUDED.md_filename,
+           md_path = EXCLUDED.md_path,
+           code = EXCLUDED.code,
+           conversion_status = 'completed',
+           converted_at = NOW();`,
+      [uploadId, mdFilename, mdPath, code || 'misc'],
     );
-    console.log(`Saved converted file for upload_id=${uploadId}`);
   } catch (err) {
     console.error('DB insert error for converted_files:', err.message);
   }
@@ -259,6 +313,7 @@ async function saveConvertedFile(uploadId, mdFilename, mdPath) {
 
 app.use('/api/admin', adminRoutes);
 app.use('/api/downloads', downloadsRouter);
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));

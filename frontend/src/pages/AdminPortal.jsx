@@ -31,6 +31,7 @@ export default function AdminPortal() {
   };
 
   useEffect(() => {
+    document.title = 'CloudBrink - Admin';
     fetchDocuments();
   }, []);
 
