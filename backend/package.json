@@ -13,11 +13,13 @@
   "type": "module",
   "dependencies": {
     "@opendocsg/pdf2md": "^0.2.2",
+    "canvas": "^3.2.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "mongoose": "^8.19.1",
     "multer": "^2.0.2",
+    "pdf-extract-image": "github:bangbang93/node-pdf-extract-image",
     "pdf-lib": "^1.17.1",
     "pdf-parse": "^2.2.2",
     "pdf-poppler": "^0.2.3",
