@@ -234,6 +234,7 @@ app.get('/api/images/:folder/:filename', (req, res) => {
   const { folder, filename } = req.params;
   const imagePath = path.join(__dirname, 'uploads', 'images', folder, filename);
   res.sendFile(imagePath);
+  console.log('Served image', imagePath);
 });
 
 /**

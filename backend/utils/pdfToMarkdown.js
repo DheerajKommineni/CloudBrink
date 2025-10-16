@@ -7,13 +7,84 @@ import { promisify } from 'util';
 import sharp from 'sharp';
 import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
+import * as pdfjsLib from 'pdfjs-dist/build/pdf.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const execAsync = promisify(exec);
 const require = createRequire(import.meta.url);
-const pdf = require('pdf-parse');
+const pdfParse = require('pdf-parse');
+
+// Configure worker path for PDF.js
+pdfjsLib.GlobalWorkerOptions.workerSrc = path.join(
+  path.dirname(require.resolve('pdfjs-dist/build/pdf.mjs')),
+  '../build/pdf.worker.mjs',
+);
+global.pdfjsLib = pdfjsLib;
+
+// Load table extractor dynamically
+let pdfTableExtractor = null;
+try {
+  pdfTableExtractor = (await import('./pdf-table-extractor.js')).default;
+  console.log('✓ PDF table extractor loaded');
+} catch (e) {
+  console.log('⚠ PDF table extractor not available, using fallback');
+  console.error('Load error:', e.message);
+}
+
+// 1️⃣ Normalize uneven row lengths to preserve missing columns (Agent / Connector)
+function normalizeTableColumns(rows) {
+  const maxCols = Math.max(...rows.map(r => r.length));
+  return rows.map(row => {
+    const copy = [...row];
+    while (copy.length < maxCols) copy.push('');
+    return copy;
+  });
+}
+
+function mergeMultiPageTables(tables) {
+  const merged = [];
+  let buffer = null;
+
+  const normalizeHeader = h =>
+    (h || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const headerKey = t => normalizeHeader((t.tables?.[0] || []).join(' '));
+
+  for (const t of tables) {
+    const currentHeader = headerKey(t);
+    const hasHeader = /feature|item|description|requirement/i.test(
+      currentHeader,
+    );
+
+    // ✅ continuation if current table has NO header but buffer exists
+    const isContinuation = !hasHeader && buffer;
+
+    const isSameHeader =
+      buffer &&
+      hasHeader &&
+      similarityScore(headerKey(buffer), currentHeader) > 0.8;
+
+    if (isContinuation || isSameHeader) {
+      // append body rows only (skip potential headers)
+      buffer.tables.push(...t.tables.slice(hasHeader ? 1 : 0));
+    } else {
+      if (buffer) merged.push(buffer);
+      buffer = t;
+    }
+  }
+
+  if (buffer) merged.push(buffer);
+  return merged;
+}
+
+/** Simple similarity helper (Jaccard-style overlap on header words) */
+function similarityScore(a, b) {
+  const aWords = new Set(a.split(/\s+/));
+  const bWords = new Set(b.split(/\s+/));
+  const intersection = new Set([...aWords].filter(x => bWords.has(x)));
+  return intersection.size / Math.max(aWords.size, bWords.size);
+}
 
 /**
  * Parse pdfimages -list output to get image->page mapping
@@ -235,11 +306,64 @@ async function mergeLayeredDiagrams(imageDir, files, pdfPath, imagePageMap) {
   }
 }
 
-/**
- * Enhanced PDF to Markdown converter with image extraction
- */
+async function extractTablesFromPDF(pdfPath) {
+  console.log(`\n🔬 extractTablesFromPDF CALLED`);
+  console.log(`   Path: ${pdfPath}`);
+
+  if (!pdfTableExtractor || !pdfjsLib) {
+    console.log(`   ❌ EARLY EXIT: Missing dependencies`);
+    console.log(`      pdfTableExtractor: ${!!pdfTableExtractor}`);
+    console.log(`      pdfjsLib: ${!!pdfjsLib}`);
+    return null;
+  }
+
+  try {
+    console.log(`   ✓ Reading PDF file...`);
+    const dataBuffer = fs.readFileSync(pdfPath);
+    const typedArray = new Uint8Array(dataBuffer);
+    console.log(`   ✓ File size: ${typedArray.length} bytes`);
+
+    console.log(`   ✓ Loading PDF document...`);
+    const loadingTask = pdfjsLib.getDocument({
+      data: typedArray,
+      cMapUrl: path.join(process.cwd(), 'node_modules/pdfjs-dist/cmaps/'),
+      cMapPacked: true,
+    });
+
+    const pdfDoc = await loadingTask.promise;
+    console.log(`   ✓ PDF loaded: ${pdfDoc.numPages} pages`);
+
+    console.log(`   ✓ Calling pdfTableExtractor function...`);
+    const result = await pdfTableExtractor(pdfDoc);
+
+    console.log(`   ✓ pdfTableExtractor returned:`);
+    console.log(
+      `      result.pageTables: ${result?.pageTables?.length || 0} tables`,
+    );
+    console.log(`      result.numPages: ${result?.numPages}`);
+    console.log(`      result.currentPages: ${result?.currentPages}`);
+
+    if (result && result.pageTables && result.pageTables.length > 0) {
+      console.log(
+        `\n   ✅ SUCCESS: Found ${result.pageTables.length} table(s)`,
+      );
+      return result.pageTables;
+    } else {
+      console.log(`\n   ⚠️  No tables detected in PDF`);
+      return null;
+    }
+  } catch (error) {
+    console.error(`\n   ❌ ERROR in extractTablesFromPDF:`);
+    console.error(`      Message: ${error.message}`);
+    console.error(`      Stack: ${error.stack}`);
+    return null;
+  }
+}
+
 export async function pdfToMarkdown(pdfPath, outputDir) {
   const baseName = path.basename(pdfPath, '.pdf');
+  console.log(`\n🔍 Processing: ${baseName}`);
+
   const imageDir = path.join(
     outputDir || path.dirname(pdfPath),
     'images',
@@ -259,13 +383,58 @@ export async function pdfToMarkdown(pdfPath, outputDir) {
     images = await extractImagesFromPDF(pdfPath, outputDir);
   }
 
-  // Skip Python parser - just use JavaScript fallback
-  console.log(`Using JavaScript parser for: ${baseName}`);
+  // Try to extract tables with border detection first
+  let extractedTables = null;
+  console.log(`\n📋 Checking if table extraction needed for: ${baseName}`);
+
+  if (baseName.match(/(Release|Patch).*Notes/i)) {
+    console.log(`✓ Filename matches Release/Patch Notes pattern`);
+    console.log(`✓ pdfTableExtractor available: ${!!pdfTableExtractor}`);
+    console.log(`✓ pdfjsLib available: ${!!pdfjsLib}`);
+
+    if (pdfTableExtractor && pdfjsLib) {
+      console.log(`\n🚀 CALLING extractTablesFromPDF...`);
+      extractedTables = await extractTablesFromPDF(pdfPath);
+
+      if (extractedTables) {
+        console.log(`\n✅ TABLE EXTRACTION SUCCESS!`);
+        console.log(`   Found ${extractedTables.length} table(s)`);
+        extractedTables.forEach((table, idx) => {
+          console.log(
+            `   Table ${idx + 1}: ${table.width}x${table.height} on page ${
+              table.page
+            }`,
+          );
+        });
+      } else {
+        console.log(`\n❌ TABLE EXTRACTION RETURNED NULL`);
+      }
+    } else {
+      console.log(`\n❌ Table extractor not available:`);
+      console.log(`   pdfTableExtractor: ${!!pdfTableExtractor}`);
+      console.log(`   pdfjsLib: ${!!pdfjsLib}`);
+    }
+  } else {
+    console.log(`✗ Filename does NOT match Release/Patch Notes pattern`);
+  }
+
+  // Parse text
+  console.log(`\n📝 Parsing PDF text...`);
   const dataBuffer = fs.readFileSync(pdfPath);
-  const pdfData = await pdf(dataBuffer, { max: 0 });
+  const pdfData = await pdfParse(dataBuffer, { max: 0 });
   let text = pdfData.text;
   text = preprocessText(text);
-  text = convertToMarkdown(text, images);
+
+  // Pass extracted tables to markdown converter
+  console.log(`\n📄 Converting to markdown...`);
+  console.log(
+    `   extractedTables passed to converter: ${extractedTables ? 'YES' : 'NO'}`,
+  );
+  if (extractedTables) {
+    console.log(`   Number of tables: ${extractedTables.length}`);
+  }
+
+  text = convertToMarkdown(text, images, extractedTables);
   return text;
 }
 
@@ -361,6 +530,32 @@ async function extractImagesFromPDF(pdfPath, outputDir) {
           f.endsWith('.jpg'),
       )
       .sort();
+
+    // Fallback: render first few pages if no images detected
+    if (files.length === 0) {
+      console.log('  ⚠ No images found, using pdftoppm fallback rendering');
+      const pdfData = execSync(`pdfinfo "${pdfPath}"`, { encoding: 'utf8' });
+      const pageMatch = pdfData.match(/Pages:\s+(\d+)/);
+      const totalPages = pageMatch ? parseInt(pageMatch[1]) : 0;
+
+      for (let p = 1; p <= Math.min(totalPages, 3); p++) {
+        const outPath = path.join(
+          imageDir,
+          `page-${String(p).padStart(2, '0')}.png`,
+        );
+        try {
+          execSync(
+            `pdftoppm -png -r 150 -f ${p} -l ${p} "${pdfPath}" "${outPath.replace(
+              /\.png$/,
+              '',
+            )}"`,
+          );
+          console.log(`  ✓ Rendered fallback image for page ${p}`);
+        } catch (err) {
+          console.warn(`  ⚠ Failed to render page ${p}:`, err.message);
+        }
+      }
+    }
 
     // Merge layered diagrams with fallback rendering
     if (files.length > 1) {
@@ -768,13 +963,17 @@ export async function pdfToMarkdownWithBold(pdfPath, outputDir) {
     // Fallback to pdf-parse
     console.log('Using fallback parser with heuristic bold detection');
     const dataBuffer = fs.readFileSync(pdfPath);
-    const pdfData = await pdf(dataBuffer, { max: 0 });
+    const pdfData = await pdfParse(dataBuffer, { max: 0 });
     text = detectAndMarkBoldText(pdfData.text);
   }
 
   text = preprocessText(text);
-  text = convertToMarkdown(text, images);
-  return text;
+  const markdownContent = convertToMarkdown(text, images);
+
+  // Append footer outside parsed content
+  const finalOutput = markdownContent + '\n\n' + generateStandardFooter();
+
+  return finalOutput;
 }
 
 /**
@@ -784,7 +983,7 @@ function preprocessText(text) {
   // Fix line endings
   text = text.replace(/\r\n/g, '\n');
   text = text.replace(/\r/g, '\n');
-
+  text = text.replace(/(?<![\.\?\!:])\n(?=[a-z])/g, ' ');
   // Fix encoding issues
   text = text.replace(/â€™/g, "'");
   text = text.replace(/â€œ/g, '"');
@@ -797,6 +996,11 @@ function preprocessText(text) {
   text = text.replace(/Â /g, '');
   text = text.replace(/\u00A0/g, ' ');
   text = text.replace(/\u2022/g, '•');
+
+  // Fix stray heading markers in middle of text (like "# VPC/VNET")
+  text = text.replace(/\n#\s+([A-Z][A-Z\/]+)/g, '\n$1'); // Remove # before acronyms like VPC/VNET
+  text = text.replace(/([a-z,])\s*\n#\s+/g, '$1\n'); // Remove # after lowercase or comma
+  text = text.replace(/\s#\s([A-Z][A-Z\/]+)/g, ' $1'); // Remove # in middle of line
 
   // Remove header elements
   text = text.replace(/^Hybrid Access [Aa]s [Aa] Service\s*$/gim, '');
@@ -829,6 +1033,13 @@ function preprocessText(text) {
   // Remove standalone address lines
   text = text.replace(
     /530\s+Lakeside\s+Drive,?\s+Suite\s+190,?\s+Sunnyvale,?\s+CA\s+94085/gi,
+    '',
+  );
+
+  // Remove embedded "Support Information" sections (to prevent duplicates)
+  text = text.replace(/^##?\s*Support Information[\s\S]*?(?=^##\s|\Z)/gim, '');
+  text = text.replace(
+    /We would love to hear from you!.*?support@cloudbrink\.com[\s\S]*?(?=^##\s|\Z)/gim,
     '',
   );
 
@@ -874,7 +1085,16 @@ function preprocessText(text) {
         .replace(/Bridge Mode (User|Admin) Guide/gi, '');
   }
 
-  text = text.replace(/\n{4,}/g, '\n\n');
+  // Remove embedded "Support Information" sections to prevent duplication
+  text = text.replace(/^##?\s*Support Information[\s\S]*?(?=^##\s|\Z)/gim, '');
+  text = text.replace(
+    /We['’]?\s*would\s+love\s+to\s+hear\s+from\s+you!.*?support@cloudbrink\.com[\s\S]*?(?=^##\s|\Z)/gim,
+    '',
+  );
+  text = text.replace(
+    /(^|\n)\s*Support Information\s*\n+We['’]?\s*would\s+love\s+to\s+hear\s+from\s+you![\s\S]*?(?=$|\n{2,}|©|Corporate Headquarters)/gim,
+    '',
+  );
 
   return text.trim();
 }
@@ -921,23 +1141,35 @@ function restoreBoldPatterns(text) {
  * Generate standard footer for all documents
  */
 function generateStandardFooter() {
-  return `---
-  
-  **Corporate Headquarters Cloudbrink, Inc.**  
-  *530 Lakeside Drive, Suite 190, Sunnyvale, CA 94085*
+  return `
+---
 
-  <sub>© 2021 Cloudbrink, Inc. All rights reserved. Cloudbrink, the Cloudbrink logo, and all product and service names mentioned herein are registered trademarks or trademarks of Cloudbrink, Inc. in the United States and other countries. All other trademarks, service marks, registered marks, or registered service marks mentioned herein are for identification purposes only and are the property of their respective owners.</sub>`;
+## Support Information  
+We would love to hear from you! For any questions, concerns, or feedback, please reach out at [support@cloudbrink.com](mailto:support@cloudbrink.com)
+
+<div style="position: relative; background-color:#f4f4f4; color:#333333; font-size:12px; padding:60px 22px 20px 22px; border-radius:6px; margin-top:50px; opacity:0.8;">
+
+  <div style="position:absolute; top:-40px; left:0; background-color:#0097A7; color:#ffffff; padding:18px 24px; border-radius:6px; width:60%; box-shadow:0 4px 10px rgba(0,0,0,0.1);">
+    <strong style="font-size:16px; color:#ffffff;">Corporate Headquarters Cloudbrink, Inc.</strong><br>
+    <em style="font-size:15px;">530 Lakeside Drive, Suite 190, Sunnyvale, CA 94085</em>
+  </div>
+
+  <div style="margin-top:20px;">
+    © 2021 Cloudbrink, Inc. All rights reserved. Cloudbrink, the Cloudbrink logo, and all product and service names mentioned herein are registered trademarks or trademarks of Cloudbrink, Inc. in the United States and other countries. 
+    All other trademarks, service marks, registered marks, or registered service marks mentioned herein are for identification purposes only and are the property of their respective owners.
+  </div>
+</div>`;
 }
 
 /**
  * Convert to Markdown with images - ROUTER FUNCTION
  */
-function convertToMarkdown(text, images) {
+function convertToMarkdown(text, images, extractedTables = null) {
   let markdown;
 
   // Check if this is a table-based document
   if (isTableDocument(text)) {
-    markdown = convertTableDocument(text, images);
+    markdown = convertTableDocument(text, images, extractedTables);
   }
   // Check if this is a How-To guide by looking at the first image path
   else if (images.length > 0 && images[0].path.includes('HowTo')) {
@@ -1002,16 +1234,23 @@ function convertHowToMarkdown(text, images) {
       if (result.length > 0 && result[result.length - 1] !== '') {
         result.push('');
       }
-      // Once first H1 is followed by normal content, lock future H1s
-      if (firstHeadingPromoted && !h1Locked) {
-        const lastAdded = result[result.length - 1] || '';
-        if (
-          lastAdded &&
-          !lastAdded.startsWith('#') &&
-          !lastAdded.startsWith('>') &&
-          !lastAdded.startsWith('-')
-        ) {
-          h1Locked = true;
+      // Around line 625-650 - REPLACES the old lock check
+      if (isRegularHowTo && firstHeadingPromoted && !h1Locked) {
+        for (let j = result.length - 1; j >= 0; j--) {
+          const prevLine = result[j];
+          if (prevLine === '') continue;
+
+          if (
+            !prevLine.startsWith('#') &&
+            !prevLine.startsWith('>') &&
+            !prevLine.startsWith('-') &&
+            !prevLine.startsWith('![')
+          ) {
+            h1Locked = true;
+            console.log('  🔒 H1 locked after content');
+            break;
+          }
+          break;
         }
       }
 
@@ -1085,19 +1324,38 @@ function convertHowToMarkdown(text, images) {
       continue;
     }
 
-    // Subsection headers (H3) - Including "Figure X:" and section names
-    if (isHowToSubsectionHeader(line)) {
+    // Subsection headers (H3) - Check for ### prefix first
+    if (line.startsWith('### ')) {
       flushParagraph();
       result.push('');
 
-      // 🪄 Promote first H3 → H1 only for regular How-to files
+      const titleText = line.replace(/^###\s+/, '');
+
+      // Promote first H3 → H1 for regular How-to files (without "HowTo" in filename)
       if (isRegularHowTo && !firstHeadingPromoted && !h1Locked) {
-        result.push(`# ${line}`);
+        result.push(`# ${titleText}`);
         firstHeadingPromoted = true;
+        console.log(`  ✓ Promoted first H3 to H1: "${titleText}"`);
       } else {
-        result.push(`### ${line}`);
+        result.push(`### ${titleText}`);
       }
 
+      result.push('');
+
+      // Insert image after Figure headers
+      if (titleText.match(/^Figure\s+\d+:/i)) {
+        insertNextImage();
+      }
+
+      i++;
+      continue;
+    }
+
+    // Legacy: Check for specific How-To subsection patterns (without ### prefix)
+    if (isHowToSubsectionHeader(line)) {
+      flushParagraph();
+      result.push('');
+      result.push(`### ${line}`);
       result.push('');
 
       // Insert image after Figure headers
@@ -1150,6 +1408,26 @@ function convertHowToMarkdown(text, images) {
 
   return finalText.trim();
 }
+const insertNextImage = () => {
+  if (imageIndex < images.length) {
+    result.push('');
+
+    // 🔧 HARDCODE FIRST ARCHITECTURE DIAGRAM FOR BRIDGE MODE GUIDES
+    if (imageIndex === 0 && isBridgeModeGuide) {
+      result.push(
+        `![Architecture Diagram 1](/uploads/architecture/architecture.png)`,
+      );
+      console.log(` 🎨 Using hardcoded architecture diagram for ${baseName}`);
+    } else {
+      result.push(`![${images[imageIndex].alt}](${images[imageIndex].path})`);
+    }
+
+    result.push('');
+    imageIndex++;
+    return true;
+  }
+  return false;
+};
 
 /**
  * Convert standard documents to Markdown - ORIGINAL LOGIC
@@ -1165,6 +1443,12 @@ function convertStandardMarkdown(text, images) {
   let inDetailedInstructions = false;
   let inUserConfig = false;
 
+  // 🔧 DETECT IF THIS IS A BRIDGE MODE GUIDE
+  const baseName = images?.[0]?.path?.split('/')?.[3] || '';
+  const isBridgeModeGuide =
+    baseName === 'Bridge_Mode_Admin_Guide' ||
+    baseName === 'Bridge_Mode_User_Guide';
+
   const flushParagraph = () => {
     if (currentParagraph.length > 0) {
       result.push(currentParagraph.join(' '));
@@ -1175,7 +1459,17 @@ function convertStandardMarkdown(text, images) {
   const insertNextImage = () => {
     if (imageIndex < images.length) {
       result.push('');
-      result.push(`![${images[imageIndex].alt}](${images[imageIndex].path})`);
+
+      // 🔧 HARDCODE FIRST ARCHITECTURE DIAGRAM FOR BRIDGE MODE GUIDES
+      if (imageIndex === 0 && isBridgeModeGuide) {
+        result.push(
+          `![Architecture Diagram 1](/uploads/architecture/architecture.png)`,
+        );
+        console.log(` 🎨 Using hardcoded architecture diagram for ${baseName}`);
+      } else {
+        result.push(`![${images[imageIndex].alt}](${images[imageIndex].path})`);
+      }
+
       result.push('');
       imageIndex++;
       return true;
@@ -1185,6 +1479,10 @@ function convertStandardMarkdown(text, images) {
 
   while (i < lines.length) {
     let line = lines[i].trim();
+
+    if (i < 5) {
+      console.log(`Line ${i}: "${line}"`);
+    }
 
     if (!line) {
       flushParagraph();
@@ -1264,6 +1562,30 @@ function convertStandardMarkdown(text, images) {
         inUserConfig = false;
       }
 
+      i++;
+      continue;
+    }
+
+    // Subsection headers (H3)
+    // Subsection headers (H3) - Promote first one to H1
+    if (line.startsWith('### ')) {
+      flushParagraph();
+      result.push('');
+
+      // Check if this is the FIRST heading (promote to H1)
+      const hasAnyHeading = result.some(r => /^#+ /.test(r));
+
+      if (!hasAnyHeading) {
+        // This is the first heading - promote to H1
+        const titleText = line.replace(/^###\s+/, '');
+        result.push(`# ${titleText}`);
+        console.log(`  ✓ Promoted first H3 to H1: "${titleText}"`);
+      } else {
+        // Keep subsequent H3s as-is
+        result.push(line);
+      }
+
+      result.push('');
       i++;
       continue;
     }
@@ -1449,125 +1771,597 @@ function convertStandardMarkdown(text, images) {
 }
 
 /**
- * Convert table-based documents (release notes) - WITH STANDARD FOOTER
+ * Convert extracted table data to Markdown — FIXED CLASSIFICATION & NUMBERING
  */
-function convertTableDocument(text, images) {
-  const lines = text
-    .split('\n')
-    .map(l => l.trim())
-    .filter(l => l);
+function convertExtractedTableToMarkdown(tableData) {
+  const result = [];
+  const rows = normalizeTableColumns(tableData.tables);
 
-  // Find and extract the title
-  let titleLine = '';
+  // Detect section label
+  const headerRow = rows[0] || [];
+  const headerText = headerRow.map(c => (c || '').toLowerCase()).join(' ');
 
-  for (const line of lines) {
-    if (line.match(/(Release|Patch) Notes.*Cloudbrink.*\d+\.\d+/i)) {
-      const titleMatch = line.match(
-        /((Release|Patch) Notes.*Cloudbrink.*\d+\.\d+[\.\d]*)/i,
-      );
-      if (titleMatch) {
-        titleLine = titleMatch[1];
+  let sectionLabel = null;
+  if (headerText.includes('feature')) sectionLabel = 'New Features';
+  else if (headerText.includes('issue') || headerText.includes('item'))
+    sectionLabel = 'Issues Resolved';
+
+  // Detect if both sections exist globally (set once at convertTableDocument)
+  const hasAgentCols = !!convertExtractedTableToMarkdown.hasAgentCols;
+  const continuingTable = !!convertExtractedTableToMarkdown.continuing;
+
+  // ✅ Only start a new section when header explicitly says "feature" or "issue"
+  if (sectionLabel && !continuingTable) {
+    result.push(`\n## ${sectionLabel}\n`);
+    const baseHeader = hasAgentCols
+      ? '| # | Feature | Description | Agent | Connector |'
+      : '| # | Feature | Description |';
+    const baseDivider = hasAgentCols
+      ? '|---|---|---|---|---|'
+      : '|---|---|---|';
+    result.push(baseHeader);
+    result.push(baseDivider);
+  } else if (continuingTable) {
+    console.log('  🔗 Continuing previous table (no new header)');
+    // no header repeat
+  } else {
+    // ✅ Only create a fallback section if no section yet AND table has meaningful rows
+    const hasContent = rows.length > 3;
+    if (!convertExtractedTableToMarkdown.hasActiveTable && hasContent) {
+      const inferredLabel = hasAgentCols
+        ? 'New Features'
+        : 'Miscellaneous Updates';
+      result.push(`\n## ${inferredLabel}\n`);
+
+      const headers = ['#', 'Feature', 'Description'];
+      if (hasAgentCols) {
+        headers.push('Agent', 'Connector');
       }
+
+      result.push(`| ${headers.join(' | ')} |`);
+      result.push(`| ${headers.map(() => '---').join(' | ')} |`);
     }
   }
 
-  const result = [];
+  convertExtractedTableToMarkdown.hasActiveTable = true;
 
-  // Add title
-  if (titleLine) {
-    result.push(`# ${titleLine}`);
+  // Map likely column indexes
+  const firstData = rows[1] || [];
+  const hasEmptyLead = firstData.length > 3 && !firstData[0]?.trim();
+
+  const numIdx = hasEmptyLead ? 1 : 0;
+  const featIdx = hasEmptyLead ? 2 : 1;
+  const descIdx = hasEmptyLead ? 3 : 2;
+
+  let localNum = 1;
+  for (const row of rows.slice(1)) {
+    const n = row[numIdx]?.trim() || localNum.toString();
+    const f = row[featIdx]?.trim() || '';
+    const d = row[descIdx]?.trim() || '';
+    const a = row[descIdx + 1]?.trim() || '';
+    const c = row[descIdx + 2]?.trim() || '';
+
+    // Skip blank or header-like rows
+    if (!f && !d) continue;
+    if (/^(feature|item|description)$/i.test(f)) continue;
+    if (/support information/i.test(f)) continue;
+
+    result.push(
+      `| ${localNum} | ${escapeMarkdown(f)} | ${escapeMarkdown(d)} | ${
+        a || '-'
+      } | ${c || '-'} |`,
+    );
+    localNum++;
+  }
+
+  result.push('');
+  return result;
+}
+
+/**
+ * Detects embedded second headers like "Item Description" inside one table.
+ * Splits them into two logical tables.
+ */
+function splitMergedTables(table) {
+  const rows = table.tables;
+  const splitIndexes = [];
+
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i].map(c => c.toLowerCase().trim());
+    if (
+      row.join(' ').includes('item') &&
+      row.join(' ').includes('description')
+    ) {
+      splitIndexes.push(i);
+    }
+  }
+
+  if (splitIndexes.length === 0) return [table];
+
+  const parts = [];
+  let start = 0;
+  for (const idx of splitIndexes) {
+    parts.push({ tables: rows.slice(start, idx) });
+    start = idx;
+  }
+  parts.push({ tables: rows.slice(start) });
+  return parts.filter(t => t.tables.length > 1);
+}
+
+function convertTableDocument(text, images, extractedTables = null) {
+  console.log('\n📊 convertTableDocument CALLED');
+  const result = [];
+  let systemReqProcessed = false; // Track if we've handled System Requirements
+
+  // ---- Title ----
+  const titleMatch = text.match(
+    /Cloudbrink.*(Release|Patch).*Notes.*\d[\d.]*/i,
+  );
+  if (titleMatch) {
+    result.push(`# ${titleMatch[0].trim()}`);
     result.push('');
   }
 
-  // Process sections
-  let i = 0;
+  // ---- Use extracted tables if any ----
+  if (extractedTables && extractedTables.length > 0) {
+    console.log(`   ✅ USING ${extractedTables.length} EXTRACTED TABLES`);
 
-  // Skip to first section
-  while (i < lines.length) {
-    if (
-      lines[i].match(/^(New Features|Issues Resolved|Support Information)$/i)
-    ) {
-      break;
-    }
-    i++;
-  }
+    // Debug: Show what each extracted table looks like BEFORE merging
+    extractedTables.forEach((t, idx) => {
+      const headerRow = (t.tables?.[0] || []).map(c =>
+        (c || '').toLowerCase().trim(),
+      );
+      console.log(`   Table ${idx + 1} header: [${headerRow.join(', ')}]`);
+    });
 
-  // Process content
-  while (i < lines.length) {
-    const line = lines[i];
+    const mergedTables = mergeMultiPageTables(extractedTables);
 
-    if (!line) {
-      i++;
-      continue;
-    }
+    console.log(`   📊 After merging: ${mergedTables.length} table(s)`);
+    mergedTables.forEach((t, idx) => {
+      console.log(
+        `      Merged table ${idx + 1}: ${t.tables?.length || 0} rows`,
+      );
+    });
 
-    // Skip footer content
-    if (
-      line.startsWith('©') ||
-      line.match(
-        /530 Lakeside|Corporate Headquarters|Software Defined Mobility/i,
-      ) ||
-      line === titleLine
-    ) {
-      i++;
-      continue;
-    }
+    // Detect if file has both sections
+    const hasBothSections =
+      /New Features/i.test(text) && /System Requirements/i.test(text);
+    convertExtractedTableToMarkdown.hasAgentCols = hasBothSections;
 
-    // Section headers
-    if (line.match(/^(New Features|Issues Resolved|Support Information)$/i)) {
-      result.push('');
-      result.push(`## ${line}`);
-      result.push('');
-      i++;
+    let lastHeaderTable = null;
+    let lastHeaderMarkdown = [];
+    let tableCounter = 1;
 
-      // Check for table header
-      if (
-        i < lines.length &&
-        lines[i].match(/^(Feature|Item)\s+Description$/i)
-      ) {
-        i = parseTableIntoResult(lines, i, result);
-        continue;
-      }
-      continue;
-    }
+    for (const rawTable of mergedTables) {
+      const tables = splitMergedTables(rawTable);
 
-    // Support Information content
-    if (line.match(/^We would love to hear/i)) {
-      result.push('');
-      const supportLines = [];
+      for (const t of tables) {
+        const allRows = t.tables || [];
+        const headerRow = (allRows[0] || []).map(c => c.toLowerCase().trim());
 
-      while (i < lines.length) {
-        const curr = lines[i];
-        if (
-          !curr ||
-          curr.startsWith('©') ||
-          curr.match(
-            /530 Lakeside|Corporate Headquarters|Software Defined Mobility/i,
-          )
-        ) {
-          break;
+        console.log(`  🔍 Table header: [${headerRow.join(', ')}]`);
+
+        const hasHeader =
+          headerRow.join(' ').includes('feature') ||
+          headerRow.join(' ').includes('item') ||
+          headerRow.join(' ').includes('description') ||
+          headerRow.join(' ').includes('requirement');
+
+        // 🖥️ ENHANCED SYSTEM REQUIREMENTS DETECTION
+        // Check not just header row, but ALL rows for System Requirements pattern
+        let isSystemReq = headerRow.some(c =>
+          /(client platform|version supported)/i.test(c),
+        );
+
+        // If not found in header, scan through all rows
+        if (!isSystemReq) {
+          for (let rowIdx = 0; rowIdx < allRows.length; rowIdx++) {
+            const rowText = allRows[rowIdx].join(' ').toLowerCase();
+
+            // Look for the "Client Platform" + "Version Supported" pattern
+            if (/(client platform|version supported)/i.test(rowText)) {
+              console.log(`  🔍 Found System Requirements at row ${rowIdx}`);
+
+              // Split the table at this point
+              const beforeRows = allRows.slice(0, rowIdx);
+              const sysReqRows = allRows.slice(rowIdx);
+
+              // Process the "before" part as regular table if it has content
+              if (beforeRows.length > 1) {
+                console.log(
+                  `  📊 Processing ${beforeRows.length} rows before System Requirements`,
+                );
+                const beforeTable = { tables: beforeRows };
+
+                // Process this part recursively (without system req detection)
+                const tempHeader = (beforeRows[0] || []).map(c =>
+                  c.toLowerCase().trim(),
+                );
+                const tempHasHeader = tempHeader.join(' ').includes('feature');
+
+                if (tempHasHeader || beforeRows.length > 2) {
+                  convertExtractedTableToMarkdown.continuing = false;
+                  convertExtractedTableToMarkdown.hasActiveTable = false;
+                  const block = convertExtractedTableToMarkdown({
+                    tables: beforeRows,
+                  });
+                  result.push(...block);
+                }
+              }
+
+              // Now process System Requirements
+              isSystemReq = true;
+              t.tables = sysReqRows; // Update current table to only System Requirements
+              break;
+            }
+          }
         }
-        supportLines.push(curr);
-        i++;
+
+        console.log(`  📋 hasHeader=${hasHeader}, isSystemReq=${isSystemReq}`);
+
+        if (isSystemReq) {
+          console.log('  🖥 Detected System Requirements table');
+          console.log('  📊 Table has', t.tables.length, 'rows');
+          systemReqProcessed = true;
+
+          // Extract introductory text before the table
+          const sysStart = text.indexOf('System Requirements');
+          if (sysStart !== -1) {
+            const sysText = text.slice(sysStart);
+
+            result.push('\n## System Requirements\n');
+
+            const componentMatch = sysText.match(
+              /Cloudbrink solution consists of multiple components\./i,
+            );
+            if (componentMatch) {
+              result.push(componentMatch[0] + '\n');
+            }
+
+            const introMatch = sysText.match(
+              /A\.\s+The Brink App is installed[^\n]+quality of experience features\./i,
+            );
+            if (introMatch) {
+              result.push(introMatch[0] + '\n');
+            }
+          } else {
+            result.push('\n## System Requirements\n');
+          }
+
+          result.push('| Client Platform | Version Supported |');
+          result.push('|---|---|');
+
+          // Process System Requirements rows from the table
+          const rows = normalizeTableColumns(t.tables.slice(1)); // Skip header row
+
+          for (const row of rows) {
+            if (row.filter(Boolean).length >= 2) {
+              const platform = row[0]?.trim() || '';
+              const version = row.slice(1).join(' ').trim();
+
+              // Skip header-like rows
+              if (
+                platform &&
+                version &&
+                !/^(Client Platform|Version Supported)$/i.test(platform)
+              ) {
+                result.push(`| ${platform} | ${version} |`);
+                console.log(`    ✓ Added: ${platform} | ${version}`);
+              }
+            }
+          }
+
+          result.push('');
+          continue; // Skip normal processing for this table
+        }
+
+        // ✅ CONTINUATION CASE — table without header
+        if (!hasHeader && lastHeaderTable) {
+          console.log('  🔗 Continuing previous table (no header detected)');
+          convertExtractedTableToMarkdown.continuing = true;
+
+          const continuationBlock = convertExtractedTableToMarkdown(t);
+          // Continue numbering
+          const numberedBlock = continuationBlock.map(line => {
+            if (line.startsWith('|') && line.includes('|')) {
+              const parts = line.split('|').map(p => p.trim());
+              if (parts.length > 1 && /^\d+$/.test(parts[1])) {
+                parts[1] = tableCounter++;
+                return `| ${parts.slice(1).join(' | ')}`;
+              }
+            }
+            return line;
+          });
+
+          lastHeaderMarkdown.push(...numberedBlock);
+          continue;
+        }
+
+        // ✅ NEW HEADER CASE — flush previous continuation
+        if (lastHeaderTable && lastHeaderMarkdown.length > 0) {
+          result.push(...lastHeaderMarkdown);
+          lastHeaderMarkdown = [];
+          convertExtractedTableToMarkdown.continuing = false;
+        }
+
+        // ✅ Start new table block
+        convertExtractedTableToMarkdown.continuing = false;
+        convertExtractedTableToMarkdown.hasActiveTable = false;
+        const block = convertExtractedTableToMarkdown(t);
+        result.push(...block);
+        lastHeaderTable = t;
+
+        // Reset numbering for next header
+        tableCounter = 1;
+      }
+    }
+
+    // Flush leftover continuation
+    if (lastHeaderMarkdown.length > 0) {
+      result.push(...lastHeaderMarkdown);
+    }
+
+    // ✅ FALLBACK: If System Requirements wasn't detected in tables, extract from text
+    if (!systemReqProcessed && /System Requirements/i.test(text)) {
+      console.log(
+        '  🧩 System Requirements not found in tables - extracting from text',
+      );
+
+      const sysStart = text.indexOf('System Requirements');
+      const sysText = text.slice(sysStart);
+
+      result.push('\n## System Requirements\n');
+
+      // Extract "Cloudbrink solution consists..." text
+      const componentMatch = sysText.match(
+        /Cloudbrink solution consists of multiple components\./i,
+      );
+      if (componentMatch) {
+        result.push(componentMatch[0] + '\n');
       }
 
-      result.push(supportLines.join(' '));
+      // Extract "A. The Brink App..." text
+      const introMatch = sysText.match(
+        /A\.\s+The Brink App is installed on end-user desktops for providing secure connectivity and quality of experience features\./i,
+      );
+      if (introMatch) {
+        result.push(introMatch[0] + '\n');
+      }
+
+      result.push('| Client Platform | Version Supported |');
+      result.push('|---|---|');
+
+      // Extract platform information from text
+      const platformLines = sysText
+        .split('\n')
+        .map(l => l.trim())
+        .filter(
+          l =>
+            /(Windows|Mac|Linux|Ubuntu|FreeBSD|iOS|Android|Chrome|Chromebook)/i.test(
+              l,
+            ) && !/^(Client Platform|Version Supported)$/i.test(l),
+        );
+
+      for (const line of platformLines) {
+        // Skip header row
+        if (/Client Platform.*Version Supported/i.test(line)) continue;
+
+        // Try to split by multiple spaces or tabs
+        const parts = line.split(/\s{2,}|\t+/);
+        if (parts.length >= 2) {
+          const platform = parts[0].trim();
+          const version = parts.slice(1).join(' ').trim();
+
+          if (platform && version) {
+            result.push(`| ${platform} | ${version} |`);
+          }
+        }
+      }
+
       result.push('');
+    }
+
+    result.push('');
+    result.push(generateStandardFooter());
+    return result.join('\n').trim();
+  }
+
+  // ---- Fallback: Text-based detection ----
+  console.log('   ⚠️  USING TEXT-BASED TABLE FALLBACK');
+  const lines = text
+    .split('\n')
+    .map(l => l.trim())
+    .filter(Boolean);
+
+  let currentSection = null;
+  const pushSection = section => {
+    if (section === 'New Features') result.push('\n## New Features\n');
+    else if (section === 'Issues Resolved')
+      result.push('\n## Issues Resolved\n');
+    else result.push(`\n## ${section}\n`);
+    result.push('| # | Item | Description |');
+    result.push('|---|---|---|');
+  };
+
+  let idx = 1;
+  for (const line of lines) {
+    if (/^(New Features|Issues Resolved|Known Issues)$/i.test(line)) {
+      currentSection = line;
+      pushSection(currentSection);
+      idx = 1;
       continue;
     }
 
-    i++;
+    const m = line.match(/^(\d+)\s+(.+?)\s{2,}(.+)/);
+    if (m && currentSection) {
+      const [, , feat, desc] = m;
+      result.push(
+        `| ${idx++} | ${escapeMarkdown(feat)} | ${escapeMarkdown(desc)} |`,
+      );
+    }
   }
 
-  // Add standard footer
+  // ✅ If System Requirements section exists in text, extract it directly
+  if (/System Requirements/i.test(text)) {
+    console.log('  🧩 Forcing System Requirements extraction from text');
+    result.push('\n## System Requirements\n');
+    result.push('| Client Platform | Version Supported |');
+    result.push('|---|---|');
+
+    const sysStart = text.indexOf('System Requirements');
+    const sysSlice = text.slice(sysStart);
+    const sysLines = sysSlice
+      .split('\n')
+      .map(l => l.trim())
+      .filter(l =>
+        /(Windows|Mac|Linux|Ubuntu|FreeBSD|iOS|Android|Chrome|Chromebook|Client Platform)/i.test(
+          l,
+        ),
+      );
+
+    for (const l of sysLines) {
+      const parts = l.split(/\s{2,}/);
+      if (parts.length >= 2) {
+        const platform = parts[0].trim();
+        const version = parts.slice(1).join(' ').trim();
+        if (platform && version && !/Client Platform/i.test(platform)) {
+          result.push(`| ${platform} | ${version} |`);
+        }
+      }
+    }
+  }
+
   result.push('');
   result.push(generateStandardFooter());
-
   return result.join('\n').trim();
 }
 
 /**
- * Parse table and add to result
+ * Escape markdown special characters
+ */
+function escapeMarkdown(text) {
+  if (!text) return '';
+  return text.replace(/\|/g, '\\|').replace(/\n/g, ' ');
+}
+
+/**
+ * Parse table rows by analyzing spatial layout and positioning
+ * This uses the actual table structure from PDF instead of hardcoded patterns
+ */
+function parseTableRowsSmart(tableLines, isFeatureTable) {
+  const rows = [];
+  let currentRow = null;
+
+  // Analyze line patterns to detect column boundaries
+  const columnBoundaries = detectColumnBoundaries(tableLines);
+
+  console.log(`  📐 Detected column boundaries:`, columnBoundaries);
+
+  for (let i = 0; i < tableLines.length; i++) {
+    const line = tableLines[i];
+
+    // Check if this is a new row (starts with number)
+    const rowMatch = line.match(/^(\d+)\s+(.*)$/);
+
+    if (rowMatch) {
+      // Save previous row
+      if (currentRow) {
+        rows.push(currentRow);
+      }
+
+      const [, num, rest] = rowMatch;
+
+      // Use column boundaries to split the line
+      const { feature, description } = splitByColumns(rest, columnBoundaries);
+
+      currentRow = {
+        num,
+        feature: feature.trim(),
+        description: description.trim(),
+      };
+    } else if (currentRow && line.trim()) {
+      // Continuation line - determine which column it belongs to
+      const { feature, description } = splitByColumns(line, columnBoundaries);
+
+      if (description.trim() || currentRow.description) {
+        // If we found description content or already have description, add to description
+        currentRow.description += ' ' + (description || line).trim();
+      } else {
+        // Otherwise add to feature
+        currentRow.feature += ' ' + (feature || line).trim();
+      }
+    }
+  }
+
+  if (currentRow) {
+    rows.push(currentRow);
+  }
+
+  return rows;
+}
+
+/**
+ * Detect column boundaries by analyzing multiple lines
+ * Returns the character position where description column typically starts
+ */
+function detectColumnBoundaries(lines) {
+  // Look for patterns in spacing to identify where columns split
+  const spacingAnalysis = [];
+
+  for (const line of lines.slice(0, Math.min(20, lines.length))) {
+    // Skip very short lines
+    if (line.length < 20) continue;
+
+    // Find positions of multiple consecutive spaces (likely column boundaries)
+    let pos = 0;
+    while (pos < line.length) {
+      const match = line.substring(pos).match(/\s{3,}/);
+      if (match && match.index !== undefined) {
+        const boundaryPos = pos + match.index;
+        spacingAnalysis.push(boundaryPos);
+        pos = boundaryPos + match[0].length;
+      } else {
+        break;
+      }
+    }
+  }
+
+  // Find the most common boundary position (median)
+  if (spacingAnalysis.length > 0) {
+    spacingAnalysis.sort((a, b) => a - b);
+    const median = spacingAnalysis[Math.floor(spacingAnalysis.length / 2)];
+    return { descriptionStart: median };
+  }
+
+  // Fallback: assume description starts after reasonable feature length
+  return { descriptionStart: 40 };
+}
+
+/**
+ * Split line into columns based on detected boundaries
+ */
+function splitByColumns(line, boundaries) {
+  const { descriptionStart } = boundaries;
+
+  // If line is shorter than boundary, it's all in first column
+  if (line.length < descriptionStart) {
+    return { feature: line, description: '' };
+  }
+
+  // Split at the boundary
+  const feature = line.substring(0, descriptionStart);
+  const description = line.substring(descriptionStart);
+
+  // Check if the split makes sense (feature part shouldn't be all spaces)
+  if (feature.trim().length === 0) {
+    return { feature: '', description: line };
+  }
+
+  return { feature, description };
+}
+
+/**
+ * Parse table and add to result - FIXED FOR MULTI-PAGE TABLES
  */
 function parseTableIntoResult(lines, startIndex, result) {
   let i = startIndex;
@@ -1581,32 +2375,55 @@ function parseTableIntoResult(lines, startIndex, result) {
   result.push('|---|---|---|');
   i++;
 
-  // Collect table lines
+  // Collect ALL table lines, even across page breaks
   const tableLines = [];
+  let consecutiveNonTableLines = 0;
 
   while (i < lines.length) {
     const line = lines[i];
 
     if (!line) {
       i++;
+      consecutiveNonTableLines++;
+      // Allow some blank lines but stop if too many
+      if (consecutiveNonTableLines > 3) break;
       continue;
     }
 
-    // Stop at section or noise
+    // CRITICAL: Don't stop at footer - skip it and continue
     if (
-      line.match(/^(New Features|Issues Resolved|Support Information)$/i) ||
       line.startsWith('©') ||
-      line.match(/530 Lakeside|Corporate Headquarters|Hybrid Access/i)
+      line.match(
+        /530 Lakeside|Corporate Headquarters|Software Defined Mobility|Cloudbrink Personal SASE|Hybrid Access/i,
+      )
     ) {
+      console.log(`  ⚠️  Skipping footer line: ${line.substring(0, 50)}...`);
+      i++;
+      consecutiveNonTableLines++;
+      continue;
+    }
+
+    // Stop only at actual next section headers
+    if (
+      line.match(
+        /^(New Features|Issues Resolved|Known Issues|Enhancements|Support Information)$/i,
+      )
+    ) {
+      console.log(`  ✓ Found next section: ${line}`);
       break;
     }
 
+    // This is a table content line
+    consecutiveNonTableLines = 0;
     tableLines.push(line);
     i++;
   }
 
+  console.log(`  📊 Collected ${tableLines.length} table content lines`);
+
   // Parse rows with better splitting
   const rows = parseTableRowsSmart(tableLines, isFeatureTable);
+  console.log(`  ✓ Parsed ${rows.length} table rows`);
 
   rows.forEach(row => {
     result.push(
@@ -1622,82 +2439,6 @@ function parseTableIntoResult(lines, startIndex, result) {
 }
 
 /**
- * Smart table row parsing with better feature/description detection
- */
-function parseTableRowsSmart(tableLines, isFeatureTable) {
-  const rows = [];
-  let currentRow = null;
-
-  for (const line of tableLines) {
-    const rowMatch = line.match(/^(\d+)\s+(.+)$/);
-
-    if (rowMatch) {
-      // Save previous
-      if (currentRow) {
-        rows.push(currentRow);
-      }
-
-      const [, num, rest] = rowMatch;
-
-      // Better splitting logic
-      let feature, description;
-
-      if (isFeatureTable) {
-        // For features: look for action words that start descriptions
-        const descMatch = rest.match(
-          /^(.+?)\s+(This feature|Enables|Brink App is|Enhanced|Allows|The |Admins can|Admin can|Customers can|DPA |Updated |Improved |Increased )/i,
-        );
-
-        if (descMatch) {
-          feature = descMatch[1].trim();
-          description = descMatch[2] + rest.substring(descMatch[0].length);
-        } else {
-          // Fallback: features are typically 2-5 words
-          const words = rest.split(/\s+/);
-          const splitAt = Math.min(5, words.length > 8 ? 4 : 3);
-          feature = words.slice(0, splitAt).join(' ');
-          description = words.slice(splitAt).join(' ');
-        }
-      } else {
-        // For issues: look for past tense verbs
-        const descMatch = rest.match(
-          /^(.+?)\s+(Resolve|Resolved|Fixed|Corrected|We have|Increased )/i,
-        );
-
-        if (descMatch) {
-          feature = descMatch[1].trim();
-          description = descMatch[2] + rest.substring(descMatch[0].length);
-        } else {
-          // Issues are short: 1-3 words
-          const words = rest.split(/\s+/);
-          const splitAt = Math.min(3, words.length > 5 ? 2 : 1);
-          feature = words.slice(0, splitAt).join(' ');
-          description = words.slice(splitAt).join(' ');
-        }
-      }
-
-      currentRow = { num, feature, description };
-    } else if (currentRow && line) {
-      // Continuation
-      currentRow.description += ' ' + line;
-    }
-  }
-
-  if (currentRow) {
-    rows.push(currentRow);
-  }
-
-  return rows;
-}
-
-/**
- * Escape markdown
- */
-function escapeMarkdown(text) {
-  return text ? text.replace(/\|/g, '\\|') : '';
-}
-
-/**
  * Detect table documents
  */
 function isTableDocument(text) {
@@ -1707,10 +2448,14 @@ function isTableDocument(text) {
 }
 
 function isMainTitle(line) {
-  if (line.match(/^Cloudbrink.*How-?To.*Guide/i)) return true; // How-To guides
+  if (line.match(/^Cloudbrink.*How-?To.*Guide/i)) return true;
   if (line.match(/^Bridge Mode (User|Admin) Guide$/i)) return true;
   if (line.match(/^App-Level\s+QOE\s+Analytics$/i)) return true;
   if (line.match(/^Release Notes.*Cloudbrink/i)) return true;
+  if (line.match(/^Cloudbrink Connector\s*-\s*/i)) return true;
+
+  // ADD THIS LINE for Active-Active docs:
+  if (line.match(/^Active-Active\s+Connectors/i)) return true;
 
   if (line.length < 60 && line.length > 10) {
     const upperCount = (line.match(/[A-Z]/g) || []).length;
