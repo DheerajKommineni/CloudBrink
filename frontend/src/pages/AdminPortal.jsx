@@ -1,9 +1,19 @@
 import { useEffect, useState, useRef } from 'react';
-import { Upload, Trash2, Edit3, Save, FileText } from 'lucide-react';
+import {
+  Upload,
+  Trash2,
+  Edit3,
+  Save,
+  FileText,
+  CheckSquare,
+  Square,
+} from 'lucide-react';
 import axios from 'axios';
 
 export default function AdminPortal() {
   const [documents, setDocuments] = useState([]);
+  const [selectionMode, setSelectionMode] = useState(false);
+
   const [newDocs, setNewDocs] = useState({
     section: '',
     description: '',
@@ -12,15 +22,22 @@ export default function AdminPortal() {
   const [editingDoc, setEditingDoc] = useState(null);
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [selectedDocs, setSelectedDocs] = useState(new Set());
+  const [toast, setToast] = useState(null);
 
   const sections = ['Admin Guides', 'How-to Guides', 'Release Notes'];
   const fileInputRef = useRef(null);
+
+  // 🎉 Toast notification with auto-dismiss
+  const showToast = (message, type = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 3000);
+  };
 
   // 📦 Fetch all uploaded documents
   const fetchDocuments = async () => {
     try {
       const res = await axios.get('/api/admin/uploads');
-      // Sort oldest first (ascending)
       const sorted = res.data.sort(
         (a, b) => new Date(a.uploaded_at) - new Date(b.uploaded_at),
       );
@@ -31,16 +48,21 @@ export default function AdminPortal() {
   };
 
   useEffect(() => {
-    document.title = 'CloudBrink - Admin';
+    document.title = 'CloudBrink Docs- Admin';
     fetchDocuments();
   }, []);
 
   // 📤 Upload multiple new documents
   const handleUpload = async e => {
     e.preventDefault();
-    if (newDocs.files.length === 0)
-      return alert('Please select at least one PDF file');
-    if (!newDocs.section) return alert('Please select a category');
+    if (newDocs.files.length === 0) {
+      showToast('Please select at least one PDF file', 'error');
+      return;
+    }
+    if (!newDocs.section) {
+      showToast('Please select a category', 'error');
+      return;
+    }
 
     const formData = new FormData();
     newDocs.files.forEach(file => formData.append('files', file));
@@ -52,13 +74,13 @@ export default function AdminPortal() {
       await axios.post('/api/admin/upload', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
-      alert('Files uploaded successfully!');
+      showToast('Files uploaded successfully!');
       setNewDocs({ section: '', description: '', files: [] });
       if (fileInputRef.current) fileInputRef.current.value = '';
       fetchDocuments();
     } catch (err) {
       console.error('Upload failed:', err);
-      alert('Upload failed. Check console for details.');
+      showToast('Upload failed. Check console for details.', 'error');
     } finally {
       setUploading(false);
     }
@@ -72,29 +94,98 @@ export default function AdminPortal() {
         description: editingDoc.description,
         section: editingDoc.section,
       });
-      alert('✅ Updated successfully!');
+      showToast('Updated successfully!');
       setEditingDoc(null);
       fetchDocuments();
     } catch (err) {
       console.error('Update failed:', err);
-      alert('Failed to update document.');
+      showToast('Failed to update document.', 'error');
     } finally {
       setLoading(false);
     }
   };
 
-  // 🗑️ Delete a document
+  // 🗑️ Delete single document
   const handleDelete = async id => {
     if (!window.confirm('Are you sure you want to delete this document?'))
       return;
     try {
       await axios.delete(`/api/admin/delete/${id}`);
-      alert('🗑️ Deleted successfully!');
+      showToast('Deleted successfully!');
       fetchDocuments();
+      setSelectedDocs(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(id);
+        return newSet;
+      });
     } catch (err) {
       console.error('Delete failed:', err);
-      alert('Failed to delete document.');
+      showToast('Failed to delete document.', 'error');
     }
+  };
+
+  // 🗑️ Delete multiple documents
+  const handleBulkDelete = async () => {
+    if (selectedDocs.size === 0) {
+      showToast('No documents selected', 'error');
+      return;
+    }
+
+    if (
+      !window.confirm(
+        `Are you sure you want to delete ${selectedDocs.size} document(s)?`,
+      )
+    )
+      return;
+
+    try {
+      setLoading(true);
+      await Promise.all(
+        Array.from(selectedDocs).map(id =>
+          axios.delete(`/api/admin/delete/${id}`),
+        ),
+      );
+      showToast(`${selectedDocs.size} document(s) deleted successfully!`);
+      setSelectedDocs(new Set());
+      fetchDocuments();
+    } catch (err) {
+      console.error('Bulk delete failed:', err);
+      showToast('Failed to delete some documents.', 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Toggle selection
+  const toggleSelection = id => {
+    setSelectionMode(true); // show checkboxes when a selection starts
+    setSelectedDocs(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(id)) newSet.delete(id);
+      else newSet.add(id);
+
+      // If nothing left selected, exit selection mode
+      if (newSet.size === 0) setSelectionMode(false);
+
+      return newSet;
+    });
+  };
+
+  // Select/Deselect all in category
+  const toggleCategorySelection = category => {
+    const categoryDocs = groupedDocs[category];
+    const categoryIds = categoryDocs.map(d => d.id);
+    const allSelected = categoryIds.every(id => selectedDocs.has(id));
+
+    setSelectedDocs(prev => {
+      const newSet = new Set(prev);
+      if (allSelected) {
+        categoryIds.forEach(id => newSet.delete(id));
+      } else {
+        categoryIds.forEach(id => newSet.add(id));
+      }
+      return newSet;
+    });
   };
 
   const groupedDocs = {
@@ -105,6 +196,17 @@ export default function AdminPortal() {
 
   return (
     <div className="min-h-screen bg-gray-50 p-8">
+      {/* Toast Notification */}
+      {toast && (
+        <div
+          className={`fixed top-4 right-4 px-6 py-3 rounded-lg shadow-lg text-white z-50 animate-fade-in ${
+            toast.type === 'success' ? 'bg-green-500' : 'bg-red-500'
+          }`}
+        >
+          {toast.message}
+        </div>
+      )}
+
       <h1 className="text-3xl font-bold text-gray-800 mb-8">
         Cloudbrink Admin Portal
       </h1>
@@ -192,7 +294,7 @@ export default function AdminPortal() {
           <button
             type="submit"
             disabled={uploading}
-            className="bg-teal-600 text-white px-5 py-2 rounded-lg hover:bg-teal-700 transition mt-2"
+            className="bg-teal-600 text-white px-5 py-2 rounded-lg hover:bg-teal-700 transition mt-2 disabled:opacity-50"
           >
             {uploading
               ? `Uploading ${newDocs.files.length} file(s)...`
@@ -203,18 +305,84 @@ export default function AdminPortal() {
 
       {/* ================= Documents Grouped ================= */}
       <div className="bg-white p-6 rounded-xl shadow-md mt-10">
-        <h2 className="text-xl font-semibold mb-6">📚 Uploaded Documents</h2>
+        <div className="flex justify-between items-center mb-6">
+          <h2 className="text-xl font-semibold text-gray-800 flex items-center gap-2">
+            📚 Uploaded Documents
+          </h2>
+
+          <div className="flex items-center gap-3">
+            {selectionMode ? (
+              <button
+                onClick={() => {
+                  setSelectionMode(false);
+                  setSelectedDocs(new Set());
+                }}
+                className="bg-white border border-teal-600 text-teal-600 px-4 py-2 rounded-lg hover:bg-teal-50 hover:border-teal-700 transition font-medium shadow-sm"
+              >
+                Cancel Selection
+              </button>
+            ) : (
+              <button
+                onClick={() => setSelectionMode(true)}
+                className="bg-teal-600 text-white px-4 py-2 rounded-lg hover:bg-teal-700 transition font-medium shadow-sm"
+              >
+                Select Documents
+              </button>
+            )}
+
+            {selectedDocs.size > 0 && (
+              <button
+                onClick={handleBulkDelete}
+                disabled={loading}
+                className="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition flex items-center gap-2 font-medium disabled:opacity-50 shadow-sm"
+              >
+                <Trash2 className="w-4 h-4" />
+                Delete Selected ({selectedDocs.size})
+              </button>
+            )}
+          </div>
+        </div>
 
         {['Admin Guides', 'How-to Guides', 'Release Notes'].map(category => (
           <div key={category} className="mb-8">
-            <h3 className="text-lg font-semibold text-primary mb-3 border-b pb-1">
-              {category}
-            </h3>
+            <div className="flex items-center gap-3 mb-3">
+              <h3 className="text-lg font-semibold text-primary border-b pb-1 flex-grow">
+                {category}
+              </h3>
+              {groupedDocs[category].length > 0 && (
+                <button
+                  onClick={() => toggleCategorySelection(category)}
+                  className="text-sm text-gray-600 hover:text-gray-800 flex items-center gap-1"
+                >
+                  {groupedDocs[category].every(d => selectedDocs.has(d.id)) ? (
+                    <>
+                      <CheckSquare className="w-4 h-4" /> Deselect All
+                    </>
+                  ) : (
+                    <>
+                      <Square className="w-4 h-4" /> Select All
+                    </>
+                  )}
+                </button>
+              )}
+            </div>
 
             {groupedDocs[category].length > 0 ? (
               <table className="min-w-full text-sm border rounded-lg overflow-hidden">
                 <thead>
                   <tr className="bg-gray-100 text-left">
+                    {selectionMode && (
+                      <th className="py-2 px-4 border w-12 text-center">
+                        <input
+                          type="checkbox"
+                          className="w-4 h-4"
+                          checked={groupedDocs[category].every(d =>
+                            selectedDocs.has(d.id),
+                          )}
+                          onChange={() => toggleCategorySelection(category)}
+                        />
+                      </th>
+                    )}
                     <th className="py-2 px-4 border">Filename</th>
                     <th className="py-2 px-4 border">Description</th>
                     <th className="py-2 px-4 border w-32 text-center">
@@ -224,7 +392,22 @@ export default function AdminPortal() {
                 </thead>
                 <tbody>
                   {groupedDocs[category].map(doc => (
-                    <tr key={doc.id} className="border-t">
+                    <tr
+                      key={doc.id}
+                      className={`border-t ${
+                        selectedDocs.has(doc.id) ? 'bg-blue-50' : ''
+                      }`}
+                    >
+                      {selectionMode && (
+                        <td className="py-2 px-4 border text-center">
+                          <input
+                            type="checkbox"
+                            className="w-4 h-4"
+                            checked={selectedDocs.has(doc.id)}
+                            onChange={() => toggleSelection(doc.id)}
+                          />
+                        </td>
+                      )}
                       <td className="py-2 px-4 border break-words max-w-xs">
                         {doc.filename}
                       </td>
@@ -250,6 +433,7 @@ export default function AdminPortal() {
                           <button
                             onClick={() => handleUpdate(doc.id)}
                             className="text-green-600 hover:text-green-800"
+                            disabled={loading}
                           >
                             <Save className="w-4 h-4 inline-block" />
                           </button>
@@ -280,6 +464,22 @@ export default function AdminPortal() {
           </div>
         ))}
       </div>
+
+      <style jsx>{`
+        @keyframes fade-in {
+          from {
+            opacity: 0;
+            transform: translateY(-10px);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
+        }
+        .animate-fade-in {
+          animation: fade-in 0.3s ease-out;
+        }
+      `}</style>
     </div>
   );
 }

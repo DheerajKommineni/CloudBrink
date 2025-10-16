@@ -6,11 +6,11 @@ const Sidebar = ({ onSelect, highlight }) => {
   const location = useLocation();
   const navigate = useNavigate();
   const sidebarRef = useRef(null);
+  const downloadsButtonRef = useRef(null);
   const [allSections, setAllSections] = useState([]);
   const [loading, setLoading] = useState(true);
   const [expandedSections, setExpandedSections] = useState({});
 
-  // Fetch all documents from backend on mount
   useEffect(() => {
     const fetchDocs = async () => {
       try {
@@ -33,8 +33,11 @@ const Sidebar = ({ onSelect, highlight }) => {
         console.log('📦 Sections with downloads:', sectionsWithDownloads);
         setAllSections(sectionsWithDownloads);
 
-        // Initially collapse all sections (start with empty object = all false)
-        setExpandedSections({});
+        const expandedByDefault = {};
+        sectionsWithDownloads.forEach((_, idx) => {
+          expandedByDefault[idx] = true;
+        });
+        setExpandedSections(expandedByDefault);
       } catch (error) {
         console.error('Failed to fetch documents:', error);
       } finally {
@@ -86,9 +89,6 @@ const Sidebar = ({ onSelect, highlight }) => {
         }
       });
       setExpandedSections(newExpandedSections);
-    } else {
-      // Collapse all when search is cleared
-      setExpandedSections({});
     }
   }, [highlight, filteredSections]);
 
@@ -96,6 +96,34 @@ const Sidebar = ({ onSelect, highlight }) => {
   const match = location.pathname.match(/\/docs\/([^/]+)\/([^/]+)/);
   const currentSection = match ? match[1] : null;
   const currentFile = match ? match[2] : null;
+
+  useEffect(() => {
+    console.log('🔍 Location changed:', location.pathname);
+
+    if (!sidebarRef.current) return;
+
+    const timer = setTimeout(() => {
+      let elementToScroll = null;
+
+      if (location.pathname === '/downloads' && downloadsButtonRef.current) {
+        elementToScroll = downloadsButtonRef.current;
+        console.log('📥 Downloads button found via ref');
+      } else {
+        elementToScroll = sidebarRef.current.querySelector('button.bg-primary');
+        console.log('🎯 Found active button via selector:', !!elementToScroll);
+      }
+
+      if (elementToScroll) {
+        console.log('📍 Scrolling to element');
+        elementToScroll.scrollIntoView({
+          behavior: 'smooth',
+          block: 'center',
+        });
+      }
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [location.pathname]);
 
   const handleItemClick = item => {
     console.log('code', item.code);
@@ -166,7 +194,7 @@ const Sidebar = ({ onSelect, highlight }) => {
     return (
       <aside className="w-60 flex-shrink-0 bg-white h-screen overflow-y-auto px-3">
         <div className="px-4 py-5">
-          <h2 className="text-xl font-bold text-primary mb-6">Documentation</h2>
+          {/* <h2 className="text-xl font-bold text-primary mb-6">Documentation</h2> */}
           <p className="text-sm text-gray-500">Loading documents...</p>
         </div>
       </aside>
@@ -176,10 +204,10 @@ const Sidebar = ({ onSelect, highlight }) => {
   return (
     <aside
       ref={sidebarRef}
-      className="w-64 flex-shrink-0 bg-white h-screen overflow-y-auto px-3"
+      className="w-64 flex-shrink-0 bg-white h-screen overflow-y-auto px-3 fixed left-0 top-0"
     >
       <div className="px-4 py-5">
-        <h2 className="text-xl font-bold text-primary mb-6">Documentation</h2>
+        {/* <h2 className="text-xl font-bold text-primary mb-6">Documentation</h2> */}
 
         {highlight && (
           <div className="mb-4 text-sm text-gray-600">
@@ -319,7 +347,11 @@ const Sidebar = ({ onSelect, highlight }) => {
           {/* 📁 Divider before Downloads */}
           <div className="mt-4 border-t border-gray-200 pt-4">
             <button
-              onClick={() => navigate('/downloads')}
+              ref={downloadsButtonRef}
+              onClick={() => {
+                console.log('🔽 Clicking downloads button');
+                navigate('/downloads');
+              }}
               className={`block w-full text-left px-3 py-2 rounded-md text-sm font-semibold transition ${
                 location.pathname === '/downloads'
                   ? 'bg-primary text-white'

@@ -6,7 +6,7 @@ export default function DownloadsPage() {
   const [downloads, setDownloads] = useState([]);
 
   useEffect(() => {
-    // document.title = 'Documentation';
+    document.title = 'Downloads - Cloudbrink Docs';
 
     // Fetch from backend
     fetch('/api/downloads')
@@ -23,7 +23,7 @@ export default function DownloadsPage() {
       <Sidebar onSelect={handleSelect} highlight="" />
 
       {/* Main Content */}
-      <main className="flex-1 px-8 py-6 overflow-y-auto">
+      <main className="flex-1 px-8 py-6 overflow-y-auto ml-64">
         <div className="flex justify-end mb-6">
           <GlobalSearch />
         </div>

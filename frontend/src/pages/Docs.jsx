@@ -10,6 +10,8 @@ import GlobalSearch from '../components/common/GlobalSearch.jsx';
 
 export default function Docs() {
   const { code, filename } = useParams();
+  const [showScrollTop, setShowScrollTop] = useState(false);
+  const mainRef = useRef(null);
   const navigate = useNavigate();
   const location = useLocation();
   const [queryParam, setQueryParam] = useState('');
@@ -88,6 +90,38 @@ export default function Docs() {
     fetchMarkdown();
   }, [code, filename, queryParam]);
 
+  // Update page title when document changes
+  useEffect(() => {
+    if (selectedItem?.label) {
+      document.title = `${selectedItem.label} - CloudBrink Docs`;
+    } else {
+      document.title = 'CloudBrink Docs';
+    }
+
+    // Cleanup: reset title when component unmounts
+    return () => {
+      document.title = 'CloudBrink Docs';
+    };
+  }, [selectedItem]);
+
+  // Show/hide scroll to top button
+  useEffect(() => {
+    const mainElement = mainRef.current;
+    if (!mainElement) return;
+
+    const handleScroll = () => {
+      setShowScrollTop(mainElement.scrollTop > 300);
+    };
+
+    mainElement.addEventListener('scroll', handleScroll);
+    return () => mainElement.removeEventListener('scroll', handleScroll);
+  }, [mdText]); // Add mdText as dependency so it re-attaches after content loads
+
+  // Scroll to top function
+  const scrollToTop = () => {
+    mainRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   // Scroll to first match when content loads with query
   // Scroll to first match only when content first loads
   //   useEffect(() => {
@@ -105,49 +139,46 @@ export default function Docs() {
 
   return (
     <div className="flex min-h-screen bg-white">
-      {/* Sidebar - Fixed width */}
+      {/* Sidebar - Fixed position */}
       <Sidebar onSelect={handleSelect} highlight={liveSearchQuery} />
 
-      {/* Right content area - Takes remaining space */}
-      <main className="flex-1 min-w-0 px-8 py-6 overflow-y-auto">
+      {/* Right content area - Takes remaining space with left margin for sidebar */}
+      <main
+        ref={mainRef}
+        className="flex-1 min-w-0 px-8 py-6 overflow-y-auto h-screen ml-64"
+      >
         {/* Global Search Bar */}
         <div className="flex justify-end mb-6">
           <GlobalSearch ref={searchRef} onSearchChange={handleSearchChange} />
         </div>
 
-        {/* Header: Title, Section, and Download */}
-        <div className="flex items-center justify-between mb-10">
-          <div className="min-w-0 flex-1">
-            <h1 className="text-2xl font-bold text-darkText mb-2">
-              {selectedItem?.label || 'Documentation'}
-            </h1>
-          </div>
-
-          {/* Download Button */}
-          {selectedItem && (
+        {selectedItem && (
+          <div className="flex justify-end mb-6">
             <button
               onClick={() => {
                 const pdfFile = selectedItem.file.replace(/\.md$/i, '.pdf');
                 const url = `/api/download/${pdfFile}`;
-
                 const a = document.createElement('a');
                 a.href = url;
                 a.download = pdfFile;
                 a.click();
               }}
-              className="ml-4 flex-shrink-0 bg-primary text-white px-4 py-2 rounded-lg text-sm hover:bg-primary/90 shadow-sm transition"
+              className="bg-primary text-white px-4 py-2 rounded-lg text-sm hover:bg-primary/90 shadow-sm transition"
             >
               ⬇️ Download PDF
             </button>
-          )}
-        </div>
+          </div>
+        )}
 
         {/* Markdown Renderer */}
         <div className="max-w-5xl">
           {loading ? (
             <p className="text-gray-500 italic text-center">Loading...</p>
           ) : mdText ? (
-            <div className="prose prose-lg prose-gray max-w-none [&_mark]:bg-yellow-200 [&_mark]:text-black [&_mark]:font-semibold [&_mark]:px-1 [&_mark]:rounded">
+            <div
+              style={{ position: 'relative', bottom: '60px' }}
+              className="prose prose-lg prose-gray max-w-none [&_mark]:bg-yellow-200 [&_mark]:text-black [&_mark]:font-semibold [&_mark]:px-1 [&_mark]:rounded"
+            >
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 rehypePlugins={[rehypeRaw]}
@@ -255,11 +286,42 @@ export default function Docs() {
               </ReactMarkdown>
             </div>
           ) : (
-            <p className="text-gray-500 text-center">
+            <p
+              style={{
+                position: 'absolute',
+                top: '40%',
+                left: '50%',
+                transform: 'translate(-50%,-50%)',
+              }}
+              className="text-gray-500 text-center"
+            >
               Select a guide from the sidebar to view its content.
             </p>
           )}
         </div>
+        {/* Scroll to Top Button */}
+        {showScrollTop && (
+          <button
+            onClick={scrollToTop}
+            className="fixed bottom-8 right-8 bg-primary text-white p-3 rounded-full shadow-lg hover:bg-primary/90 transition-all duration-300 z-50"
+            aria-label="Scroll to top"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              className="h-6 w-6"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M5 10l7-7m0 0l7 7m-7-7v18"
+              />
+            </svg>
+          </button>
+        )}
       </main>
     </div>
   );
