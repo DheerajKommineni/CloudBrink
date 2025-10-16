@@ -987,6 +987,13 @@ function convertHowToMarkdown(text, images) {
     return false;
   };
 
+  // 🧠 Detect if this file is a How-to guide but doesn't contain "HowTo" in the name
+  const baseName = images?.[0]?.path?.split('/')?.[3] || '';
+  const isRegularHowTo = /HowTo/i.test(baseName) ? false : true;
+
+  let firstHeadingPromoted = false; // Whether we've promoted H3→H1
+  let h1Locked = false; // Whether we forbid more H1s after content
+
   while (i < lines.length) {
     let line = lines[i].trim();
 
@@ -995,6 +1002,24 @@ function convertHowToMarkdown(text, images) {
       if (result.length > 0 && result[result.length - 1] !== '') {
         result.push('');
       }
+      // Once first H1 is followed by normal content, lock future H1s
+      if (firstHeadingPromoted && !h1Locked) {
+        const lastAdded = result[result.length - 1] || '';
+        if (
+          lastAdded &&
+          !lastAdded.startsWith('#') &&
+          !lastAdded.startsWith('>') &&
+          !lastAdded.startsWith('-')
+        ) {
+          h1Locked = true;
+        }
+      }
+
+      // If any new H1 appears after lock, downgrade it
+      if (h1Locked && /^# /.test(line)) {
+        line = line.replace(/^# /, '## ');
+      }
+
       i++;
       continue;
     }
@@ -1064,7 +1089,15 @@ function convertHowToMarkdown(text, images) {
     if (isHowToSubsectionHeader(line)) {
       flushParagraph();
       result.push('');
-      result.push(`### ${line}`);
+
+      // 🪄 Promote first H3 → H1 only for regular How-to files
+      if (isRegularHowTo && !firstHeadingPromoted && !h1Locked) {
+        result.push(`# ${line}`);
+        firstHeadingPromoted = true;
+      } else {
+        result.push(`### ${line}`);
+      }
+
       result.push('');
 
       // Insert image after Figure headers
